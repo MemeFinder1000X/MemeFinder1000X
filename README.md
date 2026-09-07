@@ -45,18 +45,24 @@ docker run --rm \
   memefinder1000x
 ```
 
-## Koyeb deployment
+## Railway deployment
 
-For a continuously running Telegram long-polling bot, use an always-on paid instance rather than Koyeb's free Web Service. Koyeb currently lists an Eco Nano instance at about $1.61/month and a Free Instance that is intended for testing and scales to zero after inactivity.
+MemeFinder 1000X is designed to run as a continuously running Telegram long-polling service.
 
-Create a service from this repository/archive, use Docker, and set:
+1. Create a new Railway project and deploy this GitHub repository.
+2. Railway will detect the root `Dockerfile` and build the service from it.
+3. Add these variables in the Railway service's **Variables** section:
+   - `TELEGRAM_BOT_TOKEN`
+   - `BIRDEYE_API_KEY`
+   - Optional: `BIRDEYE_API_BASE_URL`
+4. Leave the Dockerfile start command unchanged. The container starts with `python bot.py`.
+5. Use a normal persistent Railway service. Do not configure this bot as a cron job.
+6. No HTTP healthcheck is required for Telegram long polling; the bot does not expose an HTTP health endpoint by default.
 
-- Instance: `eco-nano` (or larger if needed)
-- Command: leave the Dockerfile default
-- Environment: `TELEGRAM_BOT_TOKEN`, `BIRDEYE_API_KEY`
+After deployment, check the Railway deployment logs for a clean startup, then send `/start` and `/scan` to the Telegram bot.
 
 ## Important
 
-Do not put real API keys or Telegram tokens into GitHub, ZIP files, source code, or screenshots. Use the hosting provider's secret/environment-variable settings.
+Do not put real API keys or Telegram tokens into GitHub, ZIP files, source code, or screenshots. Use Railway's secret/environment-variable settings.
 
 The scoring is an opportunity/risk heuristic, not a guarantee of future returns. `UNKNOWN` means the available data was insufficient and is intentionally not guessed.
