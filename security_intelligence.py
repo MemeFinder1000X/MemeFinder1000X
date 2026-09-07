@@ -39,6 +39,15 @@ def _first(data: Any, *keys: str) -> Any:
 
 
 def _percent(value: Any) -> float | None:
+    if isinstance(value, dict):
+        value = _first(
+            value,
+            "percent_of_supply",
+            "percent",
+            "percentage",
+            "supply_percent",
+            "supplyPercent",
+        )
     try:
         number = float(value)
     except (TypeError, ValueError):
@@ -73,12 +82,8 @@ def _tag_percent(data: Any, tag: str) -> float | None:
     if isinstance(data, dict):
         item = data.get(tag)
         if isinstance(item, dict):
-            return _percent(
-                _first(item, "percent_of_supply", "percent", "percentage", "supply_percent", "supplyPercent")
-            )
-        direct = _percent(
-            _first(data, tag, f"{tag}_percent", f"{tag}Percent")
-        )
+            return _percent(item)
+        direct = _percent(_first(data, tag, f"{tag}_percent", f"{tag}Percent"))
         if direct is not None:
             return direct
     if isinstance(data, list):
@@ -87,9 +92,7 @@ def _tag_percent(data: Any, tag: str) -> float | None:
                 continue
             name = str(_first(item, "tag", "name", "label") or "").lower()
             if name == tag.lower():
-                return _percent(
-                    _first(item, "percent_of_supply", "percent", "percentage", "supply_percent", "supplyPercent")
-                )
+                return _percent(item)
     return None
 
 
@@ -162,7 +165,7 @@ class SecurityIntelligence:
         holders = _unwrap_data(snapshot.data.get("token_holders"))
         if isinstance(holders, dict):
             finding.top10_percent = _percent(
-                _first(holders, "top10_holder_percent", "top10HolderPercent")
+                _first(holders, "top10_holder_percent", "top10HolderPercent", "top10_holder")
             )
 
         profile = _unwrap_data(profile)
