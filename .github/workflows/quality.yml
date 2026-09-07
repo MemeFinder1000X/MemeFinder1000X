@@ -32,3 +32,6 @@ jobs:
 
       - name: Run security unit tests
         run: python -m unittest test_security_intelligence.py -v
+
+      - name: Build deployment image
+        run: docker build --tag memefinder1000x:quality .
