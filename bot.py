@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 from developer_intelligence import DeveloperIntelligence
 from birdeye_provider import BirdeyeProvider, BirdeyeRiskEvidence
 from smart_wallet_intelligence import SmartWalletIntelligence
+from security_intelligence import SecurityIntelligence
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -63,6 +64,7 @@ _request_lock = asyncio.Lock()
 _birdeye_provider = BirdeyeProvider()
 _developer_intelligence = DeveloperIntelligence(_birdeye_provider)
 _smart_wallet_intelligence = SmartWalletIntelligence(_birdeye_provider)
+_security_intelligence = SecurityIntelligence()
 
 
 class DexScreenerError(Exception):
@@ -449,6 +451,16 @@ def _apply_developer_risk_evidence(
     pair["_analysis"] = analysis
 
 
+def _security_percent(value: Any) -> str:
+    """Render a security cohort percentage without implying missing data is safe."""
+    if value is None:
+        return "UNKNOWN"
+    try:
+        return f"{float(value):.1f}%"
+    except (TypeError, ValueError):
+        return "UNKNOWN"
+
+
 def _clip(value: Any, limit: int, fallback: str = "UNKNOWN") -> str:
     """Bound provider-controlled text before rendering it for Telegram."""
     text = str(value or fallback).replace("\n", " ").strip() or fallback
@@ -527,6 +539,7 @@ def _render_scan_results(
         analysis = pair.get("_analysis") or {}
         developer = pair.get("_developer") or {}
         smart_wallet = pair.get("_smart_wallet") or {}
+        security = pair.get("_security") or {}
         unknown = analysis.get("unknown") or []
         risk_flags = analysis.get("risk_flags") or []
         anomalies = analysis.get("anomalies") or []
@@ -610,8 +623,20 @@ def _render_scan_results(
         )
         if "Birdeye token security" in unknown:
             concise_risks.append("Critical security data unavailable")
+        security_risks = security.get("warnings") or []
+        for warning in security_risks:
+            warning_text = _clip(warning, 140)
+            if warning_text not in concise_risks:
+                concise_risks.append(warning_text)
         if not concise_risks:
             concise_risks.append("No major risk flag observed in available data")
+
+        security_score = security.get("security_score")
+        security_score_text = (
+            f"{security_score}/100" if security_score is not None else "UNKNOWN"
+        )
+        security_risk = _clip(security.get("risk"), 20, "INCONCLUSIVE")
+        security_confidence = _clip(security.get("confidence"), 12, "LOW")
 
         lines.extend(
             [
@@ -644,6 +669,25 @@ def _render_scan_results(
             ]
         )
         lines.extend(developer_lines)
+        if str(pair.get("chainId") or "").lower() == "solana":
+            lines.extend(
+                [
+                    "",
+                    "🔐 SECURITY",
+                    f"Score: {security_score_text}",
+                    f"Risk: {security_risk} | Confidence: {security_confidence}",
+                    f"Mint authority: {security.get('mint_authority', 'UNKNOWN')}",
+                    f"Freeze authority: {security.get('freeze_authority', 'UNKNOWN')}",
+                    f"Honeypot: {security.get('honeypot', 'UNKNOWN')}",
+                    f"LP status: {security.get('lp_status', 'UNKNOWN')}",
+                    f"LP lock/burn: {security.get('lp_lock_burn', 'UNKNOWN')}",
+                    f"Top 10: {_security_percent(security.get('top10_percent'))}",
+                    f"Dev: {_security_percent(security.get('dev_percent'))}",
+                    f"Insiders: {_security_percent(security.get('insider_percent'))}",
+                    f"Snipers: {_security_percent(security.get('sniper_percent'))}",
+                    f"Bundlers: {_security_percent(security.get('bundler_percent'))}",
+                ]
+            )
         lines.extend(
             [
                 "",
@@ -739,6 +783,26 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     pair, _birdeye_provider.risk_evidence(snapshot)
                 )
             _apply_developer_risk_evidence(pair, pair.get("_developer") or {})
+
+        # Security intelligence is read-only and intentionally separate from Opportunity Score.
+        # Analyze every displayed Solana token; unavailable evidence remains INCONCLUSIVE.
+        for pair in pairs:
+            base_token = pair.get("baseToken") or {}
+            chain = str(pair.get("chainId") or "").lower()
+            address = str(base_token.get("address") or "")
+            if chain != "solana" or not address:
+                continue
+            try:
+                security = await _security_intelligence.analyze(
+                    _birdeye_provider, address
+                )
+                pair["_security"] = security.__dict__
+            except Exception:
+                logger.exception("Security analysis failed for token")
+                pair["_security"] = {
+                    "risk": "INCONCLUSIVE",
+                    "confidence": "LOW",
+                }
         messages = _render_scan_messages(pairs)
     except DexScreenerError as error:
         logger.warning("DEX Screener scan failed: %s", error)
