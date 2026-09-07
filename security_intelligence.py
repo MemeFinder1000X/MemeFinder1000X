@@ -6,29 +6,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-@dataclass
-class SecurityFinding:
-    security_score: int | None = None
-    risk: str = "INCONCLUSIVE"
-    confidence: str = "LOW"
-    mint_authority: str = "UNKNOWN"
-    freeze_authority: str = "UNKNOWN"
-    honeypot: str = "UNKNOWN"
-    lp_status: str = "UNKNOWN"
-    lp_lock_burn: str = "UNKNOWN"
-    top10_percent: float | None = None
-    dev_percent: float | None = None
-    insider_percent: float | None = None
-    sniper_percent: float | None = None
-    bundler_percent: float | None = None
-    developer_wallet: str = "UNKNOWN"
-    developer_selling: str = "UNKNOWN"
-    suspicious_activity: list[str] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
-    evidence: list[str] = field(default_factory=list)
-    unknown: list[str] = field(default_factory=list)
-
-
 def _first(data: Any, *keys: str) -> Any:
     if not isinstance(data, dict):
         return None
@@ -40,14 +17,7 @@ def _first(data: Any, *keys: str) -> Any:
 
 def _percent(value: Any) -> float | None:
     if isinstance(value, dict):
-        value = _first(
-            value,
-            "percent_of_supply",
-            "percent",
-            "percentage",
-            "supply_percent",
-            "supplyPercent",
-        )
+        value = _first(value, "percent_of_supply", "percent", "percentage", "supply_percent", "supplyPercent")
     try:
         number = float(value)
     except (TypeError, ValueError):
@@ -102,30 +72,47 @@ def _unwrap_data(value: Any) -> Any:
     return value
 
 
+@dataclass
+class SecurityFinding:
+    security_score: int | None = None
+    risk: str = "INCONCLUSIVE"
+    confidence: str = "LOW"
+    mint_authority: str = "UNKNOWN"
+    freeze_authority: str = "UNKNOWN"
+    honeypot: str = "UNKNOWN"
+    lp_status: str = "UNKNOWN"
+    lp_lock_burn: str = "UNKNOWN"
+    top10_percent: float | None = None
+    dev_percent: float | None = None
+    insider_percent: float | None = None
+    sniper_percent: float | None = None
+    bundler_percent: float | None = None
+    developer_wallet: str = "UNKNOWN"
+    developer_selling: str = "UNKNOWN"
+    suspicious_activity: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    evidence: list[str] = field(default_factory=list)
+    unknown: list[str] = field(default_factory=list)
+
+
 class SecurityIntelligence:
     """Build an evidence-weighted security report without safety guarantees."""
 
     async def analyze(self, provider: Any, token_address: str) -> SecurityFinding:
         finding = SecurityFinding()
         try:
-            snapshot = await provider.analyze_token(token_address)
+            if hasattr(provider, "security_snapshot"):
+                security_raw = await provider.security_snapshot(token_address)
+            else:
+                snapshot = await provider.analyze_token(token_address)
+                security_raw = snapshot.data.get("token_security")
+                finding._snapshot = snapshot  # compatibility for older providers
         except Exception:
             finding.unknown.append("Birdeye security enrichment unavailable")
             finding.warnings.append("Security data could not be retrieved")
             return finding
 
-        profile = None
-        distribution = None
-        try:
-            profile = await provider.holder_profile(token_address)
-        except Exception:
-            finding.unknown.append("holder profile")
-        try:
-            distribution = await provider.holder_distribution(token_address)
-        except Exception:
-            finding.unknown.append("holder distribution")
-
-        security = _unwrap_data(snapshot.data.get("token_security"))
+        security = _unwrap_data(security_raw)
         if isinstance(security, dict):
             owner = _security_field(security, "ownerAddress", "owner_address")
             renounced = _security_field(security, "renounced")
@@ -134,10 +121,8 @@ class SecurityIntelligence:
                 finding.mint_authority = _authority_state(owner)
             elif renounced is not None or mintable is not None:
                 finding.mint_authority = (
-                    "DISABLED"
-                    if renounced is True or mintable is False
-                    else "ACTIVE"
-                    if renounced is False or mintable is True
+                    "DISABLED" if renounced is True or mintable is False
+                    else "ACTIVE" if renounced is False or mintable is True
                     else "UNKNOWN"
                 )
             else:
@@ -162,18 +147,15 @@ class SecurityIntelligence:
         else:
             finding.unknown.extend(["mint authority", "freeze authority", "honeypot assessment"])
 
-        holders = _unwrap_data(snapshot.data.get("token_holders"))
-        if isinstance(holders, dict):
-            finding.top10_percent = _percent(
-                _first(holders, "top10_holder_percent", "top10HolderPercent", "top10_holder")
-            )
+        try:
+            profile = _unwrap_data(await provider.holder_profile(token_address))
+        except Exception:
+            profile = None
+            finding.unknown.append("holder profile")
 
-        profile = _unwrap_data(profile)
         if isinstance(profile, dict):
             summary = profile.get("holder_summary") if isinstance(profile.get("holder_summary"), dict) else profile
-            profile_top10 = _percent(
-                _first(summary, "top10_holder", "top10_holder_percent", "top10HolderPercent")
-            )
+            profile_top10 = _percent(_first(summary, "top10_holder", "top10_holder_percent", "top10HolderPercent"))
             if profile_top10 is not None:
                 finding.top10_percent = profile_top10
             tags = profile.get("tags", {})
@@ -183,36 +165,10 @@ class SecurityIntelligence:
             finding.bundler_percent = _tag_percent(tags, "bundler")
             dev_tag = tags.get("dev") if isinstance(tags, dict) else None
             if isinstance(dev_tag, dict):
-                finding.developer_wallet = str(
-                    _first(dev_tag, "address", "wallet", "wallet_address") or finding.developer_wallet
-                )
+                finding.developer_wallet = str(_first(dev_tag, "address", "wallet", "wallet_address") or finding.developer_wallet)
             finding.evidence.append("Birdeye holder-profile data available")
 
-        distribution = _unwrap_data(distribution)
-        if isinstance(distribution, dict):
-            summary = distribution.get("summary") if isinstance(distribution.get("summary"), dict) else distribution
-            distribution_top10 = _percent(
-                _first(summary, "percent_of_supply", "top10_percent", "top10HolderPercent", "top10_holder_percent")
-            )
-            if finding.top10_percent is None:
-                finding.top10_percent = distribution_top10
-            finding.evidence.append("Birdeye holder-distribution data available")
-
-        creation = _unwrap_data(snapshot.data.get("token_creation_info"))
-        if isinstance(creation, dict):
-            creator = _first(creation, "creator", "creatorAddress", "owner", "deployer", "creator_address")
-            if creator and finding.developer_wallet == "UNKNOWN":
-                finding.developer_wallet = str(creator)
-            if creator:
-                finding.evidence.append("Developer/creator address observed in creation data")
-
-        liquidity = _unwrap_data(snapshot.data.get("liquidity_history"))
-        if isinstance(liquidity, (dict, list)):
-            finding.lp_status = "OBSERVED"
-            finding.evidence.append("Birdeye liquidity-history endpoint returned")
-        else:
-            finding.unknown.append("historical liquidity / LP status")
-
+        # LP lock/burn requires actual lock/burn proof; liquidity existence alone is not proof.
         finding.lp_lock_burn = "UNKNOWN"
         finding.unknown.append("LP lock/burn proof")
 
@@ -241,12 +197,7 @@ class SecurityIntelligence:
             elif finding.top10_percent >= 50:
                 score -= 15
                 finding.warnings.append(f"Top-10 holders control {finding.top10_percent:.1f}%")
-        for label, value in (
-            ("developer", finding.dev_percent),
-            ("insider", finding.insider_percent),
-            ("sniper", finding.sniper_percent),
-            ("bundler", finding.bundler_percent),
-        ):
+        for label, value in (("developer", finding.dev_percent), ("insider", finding.insider_percent), ("sniper", finding.sniper_percent), ("bundler", finding.bundler_percent)):
             if value is not None:
                 known += 1
                 if value >= 15:
@@ -259,10 +210,6 @@ class SecurityIntelligence:
             finding.confidence = "LOW"
         else:
             finding.security_score = max(0, min(100, score))
-            finding.risk = (
-                "LOW" if finding.security_score >= 75
-                else "MODERATE" if finding.security_score >= 55
-                else "HIGH"
-            )
+            finding.risk = "LOW" if finding.security_score >= 75 else "MODERATE" if finding.security_score >= 55 else "HIGH"
             finding.confidence = "HIGH" if known >= 5 else "MEDIUM" if known >= 3 else "LOW"
         return finding
