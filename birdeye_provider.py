@@ -22,12 +22,11 @@ from urllib.request import Request, urlopen
 logger = logging.getLogger(__name__)
 
 BIRDEYE_API = "https://public-api.birdeye.so"
+BIRDEYE_API_BASE_URL_ENV = "BIRDEYE_API_BASE_URL"
 BIRDEYE_API_KEY_ENV = "BIRDEYE_API_KEY"
 BIRDEYE_CHAIN = "solana"
 BIRDEYE_TIMEOUT_SECONDS = 12
 BIRDEYE_MAX_RETRIES = 3
-# Conservative Standard-package pacing. Higher-tier limits do not justify
-# bursting because endpoint-specific limits still apply.
 BIRDEYE_REQUEST_INTERVAL_SECONDS = 1.05
 SNAPSHOT_CACHE_SECONDS = 300
 WALLET_PNL_CACHE_SECONDS = 300
@@ -74,8 +73,11 @@ class BirdeyeProvider:
         self._last_request_at = 0.0
         self._request_lock = asyncio.Lock()
         self._snapshot_cache: dict[str, tuple[float, BirdeyeSnapshot]] = {}
+        self._security_cache: dict[str, tuple[float, Any]] = {}
         self._wallet_pnl_cache: dict[str, tuple[float, Any]] = {}
         self._wallet_pnl_details_cache: dict[str, tuple[float, Any]] = {}
+        self._holder_profile_cache: dict[str, tuple[float, Any]] = {}
+        self._holder_distribution_cache: dict[str, tuple[float, Any]] = {}
         self._cache_lock = asyncio.Lock()
 
     def _api_key(self) -> str:
@@ -83,6 +85,9 @@ class BirdeyeProvider:
         if not key:
             raise BirdeyeError(f"{BIRDEYE_API_KEY_ENV} is not configured")
         return key
+
+    def _base_url(self) -> str:
+        return os.getenv(BIRDEYE_API_BASE_URL_ENV, BIRDEYE_API).rstrip("/")
 
     async def _request(
         self,
@@ -92,7 +97,7 @@ class BirdeyeProvider:
         body: dict[str, Any] | None = None,
     ) -> Any:
         query = f"?{urlencode(params)}" if params else ""
-        url = f"{BIRDEYE_API}{path}{query}"
+        url = f"{self._base_url()}{path}{query}"
         encoded_body = json.dumps(body).encode("utf-8") if body is not None else None
         last_error: Exception | None = None
         for attempt in range(BIRDEYE_MAX_RETRIES):
@@ -111,16 +116,9 @@ class BirdeyeProvider:
             }
             if encoded_body is not None:
                 headers["Content-Type"] = "application/json"
-            request = Request(
-                url,
-                data=encoded_body,
-                headers=headers,
-                method=method,
-            )
+            request = Request(url, data=encoded_body, headers=headers, method=method)
             try:
-                response = await asyncio.to_thread(
-                    urlopen, request, timeout=BIRDEYE_TIMEOUT_SECONDS
-                )
+                response = await asyncio.to_thread(urlopen, request, timeout=BIRDEYE_TIMEOUT_SECONDS)
                 with response:
                     payload = json.loads(response.read().decode("utf-8"))
                 if not isinstance(payload, dict) or payload.get("success") is False:
@@ -129,42 +127,27 @@ class BirdeyeProvider:
             except HTTPError as error:
                 last_error = error
                 if error.code not in (408, 425, 429, 500, 502, 503, 504):
-                    raise BirdeyeError(
-                        f"Birdeye returned HTTP {error.code}"
-                    ) from error
+                    raise BirdeyeError(f"Birdeye returned HTTP {error.code}") from error
                 retry_after = error.headers.get("Retry-After")
                 try:
                     delay = float(retry_after) if retry_after else 2**attempt
                 except ValueError:
                     delay = 2**attempt
                 await asyncio.sleep(min(12, max(1, delay)))
-            except (
-                URLError,
-                TimeoutError,
-                OSError,
-                json.JSONDecodeError,
-                BirdeyeError,
-            ) as error:
+            except (URLError, TimeoutError, OSError, json.JSONDecodeError, BirdeyeError) as error:
                 last_error = error
                 if attempt < BIRDEYE_MAX_RETRIES - 1:
                     await asyncio.sleep(2**attempt)
         raise BirdeyeError("Birdeye did not respond after several attempts") from last_error
 
-    async def _get(
-        self, path: str, params: dict[str, Any] | None = None
-    ) -> Any:
+    async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         return await self._request("GET", path, params=params)
 
-    async def _post(
-        self, path: str, body: dict[str, Any] | None = None
-    ) -> Any:
+    async def _post(self, path: str, body: dict[str, Any] | None = None) -> Any:
         return await self._request("POST", path, body=body)
 
     async def authenticate(self) -> tuple[bool, str]:
-        """Check the key with the documented network-list endpoint.
-
-        Returns status text only; it never returns or logs the credential.
-        """
+        """Check the key with the documented network-list endpoint."""
         try:
             data = await self._get("/defi/networks")
             if isinstance(data, list) or isinstance(data, dict):
@@ -174,17 +157,23 @@ class BirdeyeProvider:
             logger.warning("Birdeye authentication check failed: %s", error)
             return False, str(error)
 
-    async def analyze_token(self, token_address: str) -> BirdeyeSnapshot:
-        """Fetch documented Solana token enrichment endpoints.
+    async def security_snapshot(self, token_address: str) -> Any:
+        """Fetch only token-security data needed by Security Intelligence."""
+        async with self._cache_lock:
+            cached = self._security_cache.get(token_address)
+            if cached and time.monotonic() - cached[0] < SNAPSHOT_CACHE_SECONDS:
+                return cached[1]
+        data = await self._get("/defi/token_security", {"address": token_address})
+        async with self._cache_lock:
+            self._security_cache[token_address] = (time.monotonic(), data)
+        return data
 
-        Endpoint failures are isolated so one plan restriction does not erase
-        the evidence returned by other endpoints.
-        """
+    async def analyze_token(self, token_address: str) -> BirdeyeSnapshot:
+        """Fetch documented Solana token enrichment endpoints."""
         async with self._cache_lock:
             cached = self._snapshot_cache.get(token_address)
             if cached and time.monotonic() - cached[0] < SNAPSHOT_CACHE_SECONDS:
                 return cached[1]
-
         snapshot = BirdeyeSnapshot(token_address=token_address)
         for name, path in DEFAULT_TOKEN_ENDPOINTS:
             try:
@@ -192,12 +181,44 @@ class BirdeyeProvider:
                 snapshot.data[name] = data
                 snapshot.available_endpoints.append(name)
             except BirdeyeError as error:
-                # Do not include remote response bodies or credentials in the
-                # user-facing evidence.
                 snapshot.unavailable_endpoints[name] = str(error)
         async with self._cache_lock:
             self._snapshot_cache[token_address] = (time.monotonic(), snapshot)
         return snapshot
+
+    async def holder_profile(self, token_address: str) -> Any:
+        """Read the documented Solana holder-profile aggregation."""
+        async with self._cache_lock:
+            cached = self._holder_profile_cache.get(token_address)
+            if cached and time.monotonic() - cached[0] < SNAPSHOT_CACHE_SECONDS:
+                return cached[1]
+        data = await self._get(
+            "/token/v1/holder-profile",
+            {"token_address": token_address, "interval": "1h", "include_zero_balance": "false"},
+        )
+        async with self._cache_lock:
+            self._holder_profile_cache[token_address] = (time.monotonic(), data)
+        return data
+
+    async def holder_distribution(self, token_address: str) -> Any:
+        """Read top-10 wallet-level holder concentration."""
+        async with self._cache_lock:
+            cached = self._holder_distribution_cache.get(token_address)
+            if cached and time.monotonic() - cached[0] < SNAPSHOT_CACHE_SECONDS:
+                return cached[1]
+        data = await self._get(
+            "/holder/v1/distribution",
+            {
+                "token_address": token_address,
+                "address_type": "wallet",
+                "mode": "top",
+                "top_n": 10,
+                "include_list": "false",
+            },
+        )
+        async with self._cache_lock:
+            self._holder_distribution_cache[token_address] = (time.monotonic(), data)
+        return data
 
     async def wallet_pnl(self, wallet_address: str) -> Any:
         """Read a wallet's documented P&L summary without signing anything."""
@@ -205,10 +226,7 @@ class BirdeyeProvider:
             cached = self._wallet_pnl_cache.get(wallet_address)
             if cached and time.monotonic() - cached[0] < WALLET_PNL_CACHE_SECONDS:
                 return cached[1]
-        data = await self._get(
-            "/wallet/v2/pnl/summary",
-            {"wallet": wallet_address},
-        )
+        data = await self._get("/wallet/v2/pnl/summary", {"wallet": wallet_address})
         async with self._cache_lock:
             self._wallet_pnl_cache[wallet_address] = (time.monotonic(), data)
         return data
@@ -233,70 +251,46 @@ class BirdeyeProvider:
             self._wallet_pnl_details_cache[wallet_address] = (time.monotonic(), data)
         return data
 
-    @staticmethod
-    def risk_evidence(snapshot: BirdeyeSnapshot) -> BirdeyeRiskEvidence:
-        """Extract only fields observed in documented endpoint responses."""
-        result = BirdeyeRiskEvidence()
+    def risk_evidence(self, snapshot: BirdeyeSnapshot) -> BirdeyeRiskEvidence:
+        """Extract only holder/security evidence supported by the snapshot."""
+        evidence = BirdeyeRiskEvidence()
         holders = snapshot.data.get("token_holders")
         if isinstance(holders, dict):
-            holder_count = holders.get("holder")
-            top10 = holders.get("top10_hold_percent")
-            if isinstance(holder_count, int):
-                result.holder_count = holder_count
-                result.evidence.append(f"Birdeye holder count: {holder_count}")
+            raw_count = holders.get("total") or holders.get("holderCount") or holders.get("holder_count")
             try:
-                result.top10_holder_percent = float(top10)
+                evidence.holder_count = int(raw_count) if raw_count is not None else None
             except (TypeError, ValueError):
-                pass
-            if result.top10_holder_percent is not None:
-                result.evidence.append(
-                    "Birdeye top-10 holder concentration: "
-                    f"{result.top10_holder_percent:.1f}%"
-                )
-                if result.top10_holder_percent >= 70:
-                    result.risk_flags.append(
-                        "very high top-10 holder concentration (Birdeye)"
-                    )
-                elif result.top10_holder_percent >= 50:
-                    result.risk_flags.append(
-                        "high top-10 holder concentration (Birdeye)"
-                    )
+                evidence.holder_count = None
+            raw_top10 = holders.get("top10_holder_percent") or holders.get("top10HolderPercent")
+            try:
+                evidence.top10_holder_percent = float(raw_top10) if raw_top10 is not None else None
+            except (TypeError, ValueError):
+                evidence.top10_holder_percent = None
+        if evidence.top10_holder_percent is not None:
+            if evidence.top10_holder_percent >= 70:
+                evidence.risk_flags.append("top-holder concentration >=70%")
+            elif evidence.top10_holder_percent >= 50:
+                evidence.risk_flags.append("top-holder concentration >=50%")
+            evidence.evidence.append(f"Birdeye top-10 holder concentration: {evidence.top10_holder_percent:.1f}%")
         else:
-            result.unknown.extend(["holder count", "top-holder concentration"])
-
+            evidence.unknown.append("holder concentration")
         if "token_security" not in snapshot.available_endpoints:
-            result.unknown.append("Birdeye token security")
+            evidence.unknown.append("Birdeye token security")
         if "liquidity_history" not in snapshot.available_endpoints:
-            result.unknown.extend(
-                ["historical liquidity", "exit liquidity", "liquidity-removal history"]
-            )
+            evidence.unknown.append("Birdeye liquidity history")
         if "token_creation_info" not in snapshot.available_endpoints:
-            result.unknown.append("Birdeye token creation information")
-
-        traders = snapshot.data.get("top_traders")
-        records: list[dict[str, Any]] = []
-        if isinstance(traders, dict) and isinstance(traders.get("items"), list):
-            records = [
-                item for item in traders["items"] if isinstance(item, dict)
-            ]
-        tagged = 0
-        for record in records:
-            tags = record.get("tags")
-            if not isinstance(tags, list):
-                continue
-            normalized = " ".join(str(tag).lower() for tag in tags)
-            if "developer" in normalized or "insider" in normalized:
-                tagged += 1
-        if tagged:
-            result.evidence.append(
-                f"Birdeye labeled {tagged} top-trader record(s) with "
-                "developer/insider tags; labels are signals, not ownership proof"
-            )
-        elif records:
-            result.evidence.append(
-                "Birdeye top-trader activity returned with no observed "
-                "developer/insider tags"
-            )
-        else:
-            result.unknown.append("developer/insider trader activity")
-        return result
+            evidence.unknown.append("Birdeye token creation info")
+        top_traders = snapshot.data.get("top_traders")
+        if isinstance(top_traders, dict):
+            items = top_traders.get("items") or top_traders.get("data") or []
+            if isinstance(items, list):
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    tags = item.get("tags") or item.get("labels") or []
+                    text = str(tags).lower()
+                    if any(term in text for term in ("dev", "developer", "insider")):
+                        evidence.risk_flags.append("developer/insider tag observed in top traders")
+                        evidence.evidence.append("Birdeye top-trader labeling observed")
+                        break
+        return evidence
