@@ -13,15 +13,16 @@ class FakeProvider:
     async def analyze_token(self, token_address):
         return self.snapshot
 
-    async def _get(self, path, params):
-        if path.endswith("holder-profile"):
-            if self.profile is None:
-                raise RuntimeError("unavailable")
-            self.profile_params = params
-            return self.profile
+    async def holder_profile(self, token_address):
+        if self.profile is None:
+            raise RuntimeError("unavailable")
+        self.profile_params = {"token_address": token_address}
+        return self.profile
+
+    async def holder_distribution(self, token_address):
         if self.distribution is None:
             raise RuntimeError("unavailable")
-        self.distribution_params = params
+        self.distribution_params = {"token_address": token_address}
         return self.distribution
 
 
