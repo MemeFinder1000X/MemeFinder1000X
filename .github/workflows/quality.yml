@@ -1,0 +1,34 @@
+name: quality
+
+on:
+  push:
+    branches:
+      - main
+      - feature/security-intelligence
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  python-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile source
+        run: python -m py_compile security_intelligence.py bot.py apply_security_integration.py
+
+      - name: Apply runtime integration and compile patched bot
+        run: |
+          cp bot.py /tmp/bot-before-patch.py
+          python apply_security_integration.py
+          python -m py_compile bot.py
+
+      - name: Run security unit tests
+        run: python -m unittest test_security_intelligence.py -v
