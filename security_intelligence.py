@@ -56,6 +56,10 @@ def _authority_state(value: Any) -> str:
     text = str(value).strip().lower()
     if text in {"", "none", "null", "false", "0", "disabled", "revoked"}:
         return "DISABLED"
+    # Solana's system program is the null/disabled authority in Birdeye's
+    # security glossary as well as an explicit null value.
+    if text == "11111111111111111111111111111111":
+        return "DISABLED"
     return "ACTIVE"
 
 
@@ -69,20 +73,32 @@ def _security_field(data: dict[str, Any], *keys: str) -> Any:
 
 def _tag_percent(data: Any, tag: str) -> float | None:
     if isinstance(data, dict):
-        direct = _percent(_first(data, tag, f"{tag}_percent", f"{tag}Percent"))
+        direct = _percent(
+            _first(data, tag, f"{tag}_percent", f"{tag}Percent", "percent_of_supply")
+        )
         if direct is not None:
             return direct
         item = data.get(tag)
         if isinstance(item, dict):
-            return _percent(_first(item, "percent", "percentage", "supply_percent", "supplyPercent"))
+            return _percent(
+                _first(item, "percent_of_supply", "percent", "percentage", "supply_percent", "supplyPercent")
+            )
     if isinstance(data, list):
         for item in data:
             if not isinstance(item, dict):
                 continue
             name = str(_first(item, "tag", "name", "label") or "").lower()
             if name == tag.lower():
-                return _percent(_first(item, "percent", "percentage", "supply_percent", "supplyPercent"))
+                return _percent(
+                    _first(item, "percent_of_supply", "percent", "percentage", "supply_percent", "supplyPercent")
+                )
     return None
+
+
+def _unwrap_data(value: Any) -> Any:
+    if isinstance(value, dict) and isinstance(value.get("data"), (dict, list)):
+        return value["data"]
+    return value
 
 
 class SecurityIntelligence:
@@ -97,70 +113,126 @@ class SecurityIntelligence:
             finding.warnings.append("Security data could not be retrieved")
             return finding
 
-        # Newer Solana holder endpoints are intentionally fetched separately so
-        # older provider snapshots remain backwards compatible.
         profile = None
         distribution = None
         try:
-            profile = await provider._get("/token/v1/holder-profile", {"address": token_address})
+            profile = await provider._get(
+                "/token/v1/holder-profile",
+                {
+                    "token_address": token_address,
+                    "interval": "1h",
+                    "include_zero_balance": "false",
+                },
+            )
         except Exception:
             finding.unknown.append("holder profile")
         try:
             distribution = await provider._get(
-                "/holder/v1/distribution", {"address": token_address, "mode": "top", "top_n": 10}
+                "/holder/v1/distribution",
+                {
+                    "token_address": token_address,
+                    "address_type": "wallet",
+                    "mode": "top",
+                    "top_n": 10,
+                    "include_list": "false",
+                },
             )
         except Exception:
             finding.unknown.append("holder distribution")
 
-        security = snapshot.data.get("token_security")
+        security = _unwrap_data(snapshot.data.get("token_security"))
         if isinstance(security, dict):
-            mint = _security_field(security, "mintAuthority", "mint_authority", "mintAuthorityAddress")
-            freeze = _security_field(security, "freezeAuthority", "freeze_authority", "freezeAuthorityAddress")
-            finding.mint_authority = _authority_state(mint)
-            finding.freeze_authority = _authority_state(freeze)
+            # Birdeye's current security glossary exposes ownerAddress/renounced
+            # and freezeAuthority/freezeable rather than a generic mintAuthority.
+            owner = _security_field(security, "ownerAddress", "owner_address")
+            renounced = _security_field(security, "renounced")
+            mintable = _security_field(security, "mintable")
+            if owner is not None:
+                finding.mint_authority = _authority_state(owner)
+            elif renounced is not None or mintable is not None:
+                finding.mint_authority = (
+                    "DISABLED"
+                    if renounced is True or mintable is False
+                    else "ACTIVE"
+                    if renounced is False or mintable is True
+                    else "UNKNOWN"
+                )
+            else:
+                finding.unknown.append("mint authority")
+
+            freeze = _security_field(security, "freezeAuthority", "freeze_authority")
+            freezeable = _security_field(security, "freezeable")
+            if freeze is not None:
+                finding.freeze_authority = _authority_state(freeze)
+            elif freezeable is not None:
+                finding.freeze_authority = "ACTIVE" if bool(freezeable) else "DISABLED"
+            else:
+                finding.unknown.append("freeze authority")
+
             honeypot = _security_field(security, "honeypot", "isHoneypot", "honeypotRisk")
             if honeypot is not None:
-                finding.honeypot = "YES" if str(honeypot).strip().lower() in {"true", "1", "yes", "high", "danger"} else "NO"
+                text = str(honeypot).strip().lower()
+                finding.honeypot = "YES" if text in {"true", "1", "yes", "high", "danger"} else "NO"
             else:
                 finding.unknown.append("honeypot assessment")
             finding.evidence.append("Birdeye token-security response available")
         else:
             finding.unknown.extend(["mint authority", "freeze authority", "honeypot assessment"])
 
-        holders = snapshot.data.get("token_holders")
+        holders = _unwrap_data(snapshot.data.get("token_holders"))
         if isinstance(holders, dict):
-            finding.top10_percent = _percent(_first(holders, "top10_holder_percent", "top10HolderPercent"))
+            finding.top10_percent = _percent(
+                _first(holders, "top10_holder_percent", "top10HolderPercent")
+            )
 
+        profile = _unwrap_data(profile)
         if isinstance(profile, dict):
             summary = profile.get("holder_summary") if isinstance(profile.get("holder_summary"), dict) else profile
-            finding.top10_percent = _percent(_first(summary, "top10_holder", "top10_holder_percent", "top10HolderPercent")) or finding.top10_percent
+            finding.top10_percent = (
+                _percent(_first(summary, "top10_holder", "top10_holder_percent", "top10HolderPercent"))
+                or finding.top10_percent
+            )
             tags = profile.get("tags", {})
             finding.dev_percent = _tag_percent(tags, "dev")
             finding.insider_percent = _tag_percent(tags, "insider")
             finding.sniper_percent = _tag_percent(tags, "sniper")
             finding.bundler_percent = _tag_percent(tags, "bundler")
+            dev_tag = tags.get("dev") if isinstance(tags, dict) else None
+            if isinstance(dev_tag, dict):
+                finding.developer_wallet = str(
+                    _first(dev_tag, "address", "wallet", "wallet_address") or finding.developer_wallet
+                )
             finding.evidence.append("Birdeye holder-profile data available")
 
+        distribution = _unwrap_data(distribution)
         if isinstance(distribution, dict):
+            summary = distribution.get("summary") if isinstance(distribution.get("summary"), dict) else distribution
+            distribution_top10 = _percent(
+                _first(summary, "percent_of_supply", "top10_percent", "top10HolderPercent", "top10_holder_percent")
+            )
+            # Only accept distribution summary as top-10 when the request was
+            # actually made in top-10 mode; the request above is fixed to that mode.
             if finding.top10_percent is None:
-                finding.top10_percent = _percent(_first(distribution, "top10_percent", "top10HolderPercent", "top10_holder_percent"))
+                finding.top10_percent = distribution_top10
             finding.evidence.append("Birdeye holder-distribution data available")
 
-        creation = snapshot.data.get("token_creation_info")
+        creation = _unwrap_data(snapshot.data.get("token_creation_info"))
         if isinstance(creation, dict):
-            creator = _first(creation, "creator", "creatorAddress", "owner", "deployer")
-            if creator:
+            creator = _first(creation, "creator", "creatorAddress", "owner", "deployer", "creator_address")
+            if creator and finding.developer_wallet == "UNKNOWN":
                 finding.developer_wallet = str(creator)
+            if creator:
                 finding.evidence.append("Developer/creator address observed in creation data")
 
-        liquidity = snapshot.data.get("liquidity_history")
+        liquidity = _unwrap_data(snapshot.data.get("liquidity_history"))
         if isinstance(liquidity, (dict, list)):
-            finding.lp_status = "HEALTHY" if liquidity else "UNKNOWN"
+            # Endpoint availability is evidence that liquidity history could be
+            # inspected, not proof that liquidity is locked or safe.
+            finding.lp_status = "OBSERVED"
             finding.evidence.append("Birdeye liquidity-history endpoint returned")
         else:
             finding.unknown.append("historical liquidity / LP status")
 
-        # Liquidity presence is not proof of an LP lock or burn.
         finding.lp_lock_burn = "UNKNOWN"
         finding.unknown.append("LP lock/burn proof")
 
@@ -189,7 +261,12 @@ class SecurityIntelligence:
             elif finding.top10_percent >= 50:
                 score -= 15
                 finding.warnings.append(f"Top-10 holders control {finding.top10_percent:.1f}%")
-        for label, value in (("developer", finding.dev_percent), ("insider", finding.insider_percent), ("sniper", finding.sniper_percent), ("bundler", finding.bundler_percent)):
+        for label, value in (
+            ("developer", finding.dev_percent),
+            ("insider", finding.insider_percent),
+            ("sniper", finding.sniper_percent),
+            ("bundler", finding.bundler_percent),
+        ):
             if value is not None:
                 known += 1
                 if value >= 15:
@@ -202,6 +279,10 @@ class SecurityIntelligence:
             finding.confidence = "LOW"
         else:
             finding.security_score = max(0, min(100, score))
-            finding.risk = "LOW" if finding.security_score >= 75 else "MODERATE" if finding.security_score >= 55 else "HIGH"
+            finding.risk = (
+                "LOW" if finding.security_score >= 75
+                else "MODERATE" if finding.security_score >= 55
+                else "HIGH"
+            )
             finding.confidence = "HIGH" if known >= 5 else "MEDIUM" if known >= 3 else "LOW"
         return finding
