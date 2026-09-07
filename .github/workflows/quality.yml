@@ -22,13 +22,32 @@ jobs:
           python-version: "3.12"
 
       - name: Compile source
-        run: python -m py_compile security_intelligence.py bot.py apply_security_integration.py
+        run: python -m py_compile security_intelligence.py bot.py
 
-      - name: Apply runtime integration and compile patched bot
+      - name: Verify direct security integration
         run: |
-          cp bot.py /tmp/bot-before-patch.py
-          python apply_security_integration.py
-          python -m py_compile bot.py
+          python -m py_compile bot.py security_intelligence.py
+          python - <<'PY'
+          import bot
+          from security_intelligence import SecurityIntelligence
+          assert isinstance(bot._security_intelligence, SecurityIntelligence)
+          assert "_security" in bot._render_scan_results([{
+              "chainId": "solana",
+              "baseToken": {"symbol": "TEST"},
+              "_analysis": {"opportunity_score": 50, "verdict": "WATCH", "risk_flags": [], "anomalies": [], "unknown": []},
+              "_developer": {},
+              "_smart_wallet": {},
+              "_security": {"security_score": None, "risk": "INCONCLUSIVE", "confidence": "LOW"},
+              "priceUsd": "0.001",
+              "marketCap": 10000,
+              "liquidity": {"usd": 5000},
+              "volume": {"h24": 1000},
+              "pairCreatedAt": 1,
+              "txns": {"h24": {"buys": 1, "sells": 1}},
+              "priceChange": {"h24": 1},
+              "url": "https://example.com",
+          }])
+          PY
 
       - name: Run security unit tests
         run: python -m unittest test_security_intelligence.py -v
