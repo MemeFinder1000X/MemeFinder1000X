@@ -31,7 +31,7 @@ jobs:
           import bot
           from security_intelligence import SecurityIntelligence
           assert isinstance(bot._security_intelligence, SecurityIntelligence)
-          assert "_security" in bot._render_scan_results([{
+          output = bot._render_scan_results([{
               "chainId": "solana",
               "baseToken": {"symbol": "TEST"},
               "_analysis": {"opportunity_score": 50, "verdict": "WATCH", "risk_flags": [], "anomalies": [], "unknown": []},
@@ -47,6 +47,8 @@ jobs:
               "priceChange": {"h24": 1},
               "url": "https://example.com",
           }])
+          assert "🔐 SECURITY" in output
+          assert "Risk: INCONCLUSIVE | Confidence: LOW" in output
           PY
 
       - name: Run security unit tests
