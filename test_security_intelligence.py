@@ -5,25 +5,24 @@ from security_intelligence import SecurityIntelligence
 
 
 class FakeProvider:
-    def __init__(self, snapshot, profile=None, distribution=None):
+    def __init__(self, snapshot, profile=None):
         self.snapshot = snapshot
         self.profile = profile
-        self.distribution = distribution
+        self.security_params = None
+        self.profile_params = None
+
+    async def security_snapshot(self, token_address):
+        self.security_params = {"token_address": token_address}
+        return self.snapshot.data.get("token_security")
 
     async def analyze_token(self, token_address):
-        return self.snapshot
+        raise AssertionError("SecurityIntelligence should use security_snapshot")
 
     async def holder_profile(self, token_address):
         if self.profile is None:
             raise RuntimeError("unavailable")
         self.profile_params = {"token_address": token_address}
         return self.profile
-
-    async def holder_distribution(self, token_address):
-        if self.distribution is None:
-            raise RuntimeError("unavailable")
-        self.distribution_params = {"token_address": token_address}
-        return self.distribution
 
 
 class Snapshot:
@@ -43,8 +42,6 @@ class SecurityIntelligenceTests(unittest.TestCase):
                     "freezeAuthority": "freeze-wallet",
                     "isHoneypot": False,
                 },
-                "token_holders": {"top10_holder_percent": 40},
-                "liquidity_history": {"items": []},
             })
         )
         finding = self.run_async(SecurityIntelligence().analyze(provider, "token"))
@@ -53,6 +50,7 @@ class SecurityIntelligenceTests(unittest.TestCase):
         self.assertIn("Mint authority is active", finding.warnings)
         self.assertIn("Freeze authority is active", finding.warnings)
         self.assertEqual(finding.lp_lock_burn, "UNKNOWN")
+        self.assertEqual(provider.security_params["token_address"], "token")
 
     def test_disabled_authorities_are_parsed_from_birdeye_glossary(self):
         provider = FakeProvider(
@@ -83,7 +81,6 @@ class SecurityIntelligenceTests(unittest.TestCase):
                     "bundler": {"percent_of_supply": 0.03},
                 },
             },
-            distribution={"summary": {"percent_of_supply": 61}},
         )
         finding = self.run_async(SecurityIntelligence().analyze(provider, "token"))
         self.assertEqual(finding.top10_percent, 61)
@@ -92,7 +89,6 @@ class SecurityIntelligenceTests(unittest.TestCase):
         self.assertEqual(finding.sniper_percent, 4)
         self.assertEqual(finding.bundler_percent, 3)
         self.assertEqual(provider.profile_params["token_address"], "token")
-        self.assertEqual(provider.distribution_params["token_address"], "token")
 
     def test_missing_security_data_is_inconclusive_not_safe(self):
         provider = FakeProvider(Snapshot({}))
