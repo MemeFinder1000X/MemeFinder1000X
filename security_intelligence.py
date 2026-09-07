@@ -56,8 +56,6 @@ def _authority_state(value: Any) -> str:
     text = str(value).strip().lower()
     if text in {"", "none", "null", "false", "0", "disabled", "revoked"}:
         return "DISABLED"
-    # Solana's system program is the null/disabled authority in Birdeye's
-    # security glossary as well as an explicit null value.
     if text == "11111111111111111111111111111111":
         return "DISABLED"
     return "ACTIVE"
@@ -73,16 +71,16 @@ def _security_field(data: dict[str, Any], *keys: str) -> Any:
 
 def _tag_percent(data: Any, tag: str) -> float | None:
     if isinstance(data, dict):
-        direct = _percent(
-            _first(data, tag, f"{tag}_percent", f"{tag}Percent", "percent_of_supply")
-        )
-        if direct is not None:
-            return direct
         item = data.get(tag)
         if isinstance(item, dict):
             return _percent(
                 _first(item, "percent_of_supply", "percent", "percentage", "supply_percent", "supplyPercent")
             )
+        direct = _percent(
+            _first(data, tag, f"{tag}_percent", f"{tag}Percent")
+        )
+        if direct is not None:
+            return direct
     if isinstance(data, list):
         for item in data:
             if not isinstance(item, dict):
@@ -116,34 +114,16 @@ class SecurityIntelligence:
         profile = None
         distribution = None
         try:
-            profile = await provider._get(
-                "/token/v1/holder-profile",
-                {
-                    "token_address": token_address,
-                    "interval": "1h",
-                    "include_zero_balance": "false",
-                },
-            )
+            profile = await provider.holder_profile(token_address)
         except Exception:
             finding.unknown.append("holder profile")
         try:
-            distribution = await provider._get(
-                "/holder/v1/distribution",
-                {
-                    "token_address": token_address,
-                    "address_type": "wallet",
-                    "mode": "top",
-                    "top_n": 10,
-                    "include_list": "false",
-                },
-            )
+            distribution = await provider.holder_distribution(token_address)
         except Exception:
             finding.unknown.append("holder distribution")
 
         security = _unwrap_data(snapshot.data.get("token_security"))
         if isinstance(security, dict):
-            # Birdeye's current security glossary exposes ownerAddress/renounced
-            # and freezeAuthority/freezeable rather than a generic mintAuthority.
             owner = _security_field(security, "ownerAddress", "owner_address")
             renounced = _security_field(security, "renounced")
             mintable = _security_field(security, "mintable")
@@ -188,10 +168,11 @@ class SecurityIntelligence:
         profile = _unwrap_data(profile)
         if isinstance(profile, dict):
             summary = profile.get("holder_summary") if isinstance(profile.get("holder_summary"), dict) else profile
-            finding.top10_percent = (
-                _percent(_first(summary, "top10_holder", "top10_holder_percent", "top10HolderPercent"))
-                or finding.top10_percent
+            profile_top10 = _percent(
+                _first(summary, "top10_holder", "top10_holder_percent", "top10HolderPercent")
             )
+            if profile_top10 is not None:
+                finding.top10_percent = profile_top10
             tags = profile.get("tags", {})
             finding.dev_percent = _tag_percent(tags, "dev")
             finding.insider_percent = _tag_percent(tags, "insider")
@@ -210,8 +191,6 @@ class SecurityIntelligence:
             distribution_top10 = _percent(
                 _first(summary, "percent_of_supply", "top10_percent", "top10HolderPercent", "top10_holder_percent")
             )
-            # Only accept distribution summary as top-10 when the request was
-            # actually made in top-10 mode; the request above is fixed to that mode.
             if finding.top10_percent is None:
                 finding.top10_percent = distribution_top10
             finding.evidence.append("Birdeye holder-distribution data available")
@@ -226,8 +205,6 @@ class SecurityIntelligence:
 
         liquidity = _unwrap_data(snapshot.data.get("liquidity_history"))
         if isinstance(liquidity, (dict, list)):
-            # Endpoint availability is evidence that liquidity history could be
-            # inspected, not proof that liquidity is locked or safe.
             finding.lp_status = "OBSERVED"
             finding.evidence.append("Birdeye liquidity-history endpoint returned")
         else:
