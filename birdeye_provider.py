@@ -22,6 +22,7 @@ from urllib.request import Request, urlopen
 logger = logging.getLogger(__name__)
 
 BIRDEYE_API = "https://public-api.birdeye.so"
+BIRDEYE_API_BASE_URL_ENV = "BIRDEYE_API_BASE_URL"
 BIRDEYE_API_KEY_ENV = "BIRDEYE_API_KEY"
 BIRDEYE_CHAIN = "solana"
 BIRDEYE_TIMEOUT_SECONDS = 12
@@ -72,6 +73,7 @@ class BirdeyeProvider:
         self._last_request_at = 0.0
         self._request_lock = asyncio.Lock()
         self._snapshot_cache: dict[str, tuple[float, BirdeyeSnapshot]] = {}
+        self._security_cache: dict[str, tuple[float, Any]] = {}
         self._wallet_pnl_cache: dict[str, tuple[float, Any]] = {}
         self._wallet_pnl_details_cache: dict[str, tuple[float, Any]] = {}
         self._holder_profile_cache: dict[str, tuple[float, Any]] = {}
@@ -84,6 +86,9 @@ class BirdeyeProvider:
             raise BirdeyeError(f"{BIRDEYE_API_KEY_ENV} is not configured")
         return key
 
+    def _base_url(self) -> str:
+        return os.getenv(BIRDEYE_API_BASE_URL_ENV, BIRDEYE_API).rstrip("/")
+
     async def _request(
         self,
         method: str,
@@ -92,7 +97,7 @@ class BirdeyeProvider:
         body: dict[str, Any] | None = None,
     ) -> Any:
         query = f"?{urlencode(params)}" if params else ""
-        url = f"{BIRDEYE_API}{path}{query}"
+        url = f"{self._base_url()}{path}{query}"
         encoded_body = json.dumps(body).encode("utf-8") if body is not None else None
         last_error: Exception | None = None
         for attempt in range(BIRDEYE_MAX_RETRIES):
@@ -151,6 +156,17 @@ class BirdeyeProvider:
         except BirdeyeError as error:
             logger.warning("Birdeye authentication check failed: %s", error)
             return False, str(error)
+
+    async def security_snapshot(self, token_address: str) -> Any:
+        """Fetch only token-security data needed by Security Intelligence."""
+        async with self._cache_lock:
+            cached = self._security_cache.get(token_address)
+            if cached and time.monotonic() - cached[0] < SNAPSHOT_CACHE_SECONDS:
+                return cached[1]
+        data = await self._get("/defi/token_security", {"address": token_address})
+        async with self._cache_lock:
+            self._security_cache[token_address] = (time.monotonic(), data)
+        return data
 
     async def analyze_token(self, token_address: str) -> BirdeyeSnapshot:
         """Fetch documented Solana token enrichment endpoints."""
