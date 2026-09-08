@@ -117,6 +117,10 @@ class SecurityIntelligence:
                 onchain=await __import__("asyncio").to_thread(get_mint_authorities,token_address)
                 if f.mint_authority=="UNKNOWN": f.mint_authority=onchain.get("mint_authority","UNKNOWN")
                 if f.freeze_authority=="UNKNOWN": f.freeze_authority=onchain.get("freeze_authority","UNKNOWN")
+                if "Token-security endpoint unavailable" in f.warnings:
+                    f.warnings.remove("Token-security endpoint unavailable")
+                    f.warnings.append("Birdeye token-security unavailable; LP checks remain unverified.")
+                    f.warnings.append("Mint/freeze authorities verified on-chain.")
                 f.evidence.append("Solana RPC SPL Mint authority state verified on-chain")
             except Exception as e: f.evidence.append(f"Solana RPC authority verification unavailable: {e}")
         if f.lp_lock_burn=="UNKNOWN": f.unknown.append("LP lock/burn proof")
