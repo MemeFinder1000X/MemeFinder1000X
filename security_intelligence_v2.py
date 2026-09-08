@@ -75,6 +75,23 @@ def nested_bool(source: Any, keys: tuple[str, ...]) -> bool | None:
             if parsed is not None: return parsed
     return None
 
+
+def nested_number(source: Any, keys: tuple[str, ...]) -> float | None:
+    """Find a numeric field anywhere in the documented security payload."""
+    if isinstance(source, dict):
+        for key in keys:
+            if key in source and not isinstance(source[key], (dict, list)):
+                try: return float(source[key])
+                except (TypeError, ValueError): pass
+        for value in source.values():
+            found=nested_number(value, keys)
+            if found is not None: return found
+    elif isinstance(source, list):
+        for value in source:
+            found=nested_number(value, keys)
+            if found is not None: return found
+    return None
+
 @dataclass
 class SecurityFinding:
     security_score: int|None = None
@@ -120,9 +137,8 @@ class SecurityIntelligence:
             if creator: f.developer_wallet=str(creator)
             locked=nested_bool(sec,("liquidityLocked","liquidity_locked","lpLocked","lp_locked"))
             burned=nested_bool(sec,("liquidityBurned","liquidity_burned","lpBurned","lp_burned"))
-            lp_count=first(sec,"lpHoldersCount","lp_holders_count")
-            try: f.lp_holders_count=int(lp_count) if lp_count is not None else None
-            except (TypeError,ValueError): f.lp_holders_count=None
+            lp_count=nested_number(sec,("lpHoldersCount","lp_holders_count","lpHolderCount","lp_holder_count"))
+            f.lp_holders_count=int(lp_count) if lp_count is not None and lp_count >= 0 else None
             if locked is True: f.lp_status="LOCKED"
             elif locked is False: f.lp_status="UNLOCKED"
             if burned is True: f.lp_lock_burn="BURNED"
