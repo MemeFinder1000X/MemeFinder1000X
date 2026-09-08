@@ -101,6 +101,20 @@ class SecurityIntelligenceTests(unittest.TestCase):
         self.assertEqual(finding.bundler_percent, 3)
         self.assertEqual(provider.profile_params["token_address"], "token")
 
+    def test_documented_top10_holder_shape_is_parsed(self):
+        provider = FakeProvider(
+            Snapshot({"token_security": {"isHoneypot": False}}),
+            profile={
+                "top10_holder": {"percent_of_supply": 0.73},
+                "holder_summary": {"wallet_count": 169},
+                "tags": {},
+            },
+        )
+        finding = self.run_async(SecurityIntelligence().analyze(provider, "token"))
+        self.assertAlmostEqual(finding.top10_percent, 73, places=6)
+        self.assertIn("Top-10 holders control 73.0%", finding.warnings)
+        self.assertLess(finding.security_score, 60)
+
     def test_security_failure_does_not_block_holder_fallbacks(self):
         provider = FakeProvider(
             Snapshot({}),
