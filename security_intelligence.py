@@ -69,17 +69,32 @@ def _tag_percent(data: Any, tag: str) -> float | None:
 
 
 def _unwrap_data(value: Any) -> Any:
-    if isinstance(value, dict) and isinstance(value.get("data"), (dict, list)):
-        return value["data"]
-    return value
+    """Unwrap repeated provider data envelopes without altering ordinary payloads."""
+    current = value
+    for _ in range(4):
+        if isinstance(current, dict) and isinstance(current.get("data"), (dict, list)):
+            current = current["data"]
+        else:
+            break
+    return current
 
 
 def _top10_from_profile(profile: dict[str, Any]) -> float | None:
-    """Read the documented top10_holder summary as well as legacy nested forms."""
-    candidates = [profile.get("top10_holder"), profile.get("top10Holder")]
+    """Read documented and legacy top-10 holder concentration shapes."""
+    candidates = [
+        profile.get("top10_holder"),
+        profile.get("top10Holder"),
+        profile.get("top10_holder_percent"),
+        profile.get("top10HolderPercent"),
+    ]
     summary = profile.get("holder_summary")
     if isinstance(summary, dict):
-        candidates.extend([summary.get("top10_holder"), summary.get("top10Holder")])
+        candidates.extend([
+            summary.get("top10_holder"),
+            summary.get("top10Holder"),
+            summary.get("top10_holder_percent"),
+            summary.get("top10HolderPercent"),
+        ])
     for candidate in candidates:
         parsed = _percent(candidate)
         if parsed is not None:
@@ -233,11 +248,17 @@ class SecurityIntelligence:
                 finding.warnings.append("Honeypot risk reported by provider")
         if finding.top10_percent is not None:
             known += 1
-            if finding.top10_percent >= 70:
-                score -= 25
+            if finding.top10_percent >= 90:
+                score -= 45
+                finding.warnings.append(f"Top-10 holders control {finding.top10_percent:.1f}%")
+            elif finding.top10_percent >= 70:
+                score -= 30
                 finding.warnings.append(f"Top-10 holders control {finding.top10_percent:.1f}%")
             elif finding.top10_percent >= 50:
-                score -= 15
+                score -= 20
+                finding.warnings.append(f"Top-10 holders control {finding.top10_percent:.1f}%")
+            elif finding.top10_percent >= 30:
+                score -= 10
                 finding.warnings.append(f"Top-10 holders control {finding.top10_percent:.1f}%")
         for label, value in (("developer", finding.dev_percent), ("insider", finding.insider_percent), ("sniper", finding.sniper_percent), ("bundler", finding.bundler_percent)):
             if value is not None:
@@ -255,6 +276,13 @@ class SecurityIntelligence:
             finding.warnings.append("Multiple critical security checks remain unverified")
         elif critical_unknowns >= 2:
             score -= 5
+
+        # Concentration this extreme is not compatible with a moderate/low risk label.
+        # Keep the result conservative when provider evidence is incomplete.
+        if finding.top10_percent is not None and finding.top10_percent >= 90:
+            score = min(score, 25)
+        elif finding.top10_percent is not None and finding.top10_percent >= 70:
+            score = min(score, 40)
 
         if known == 0:
             finding.security_score = None
