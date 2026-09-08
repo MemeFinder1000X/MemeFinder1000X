@@ -38,8 +38,10 @@ DEFAULT_TOKEN_ENDPOINTS = (
     ("top_traders", "/defi/v2/tokens/top_traders"),
 )
 
+
 class BirdeyeError(Exception):
     """Raised for an unavailable or invalid Birdeye response."""
+
 
 @dataclass
 class BirdeyeSnapshot:
@@ -48,6 +50,7 @@ class BirdeyeSnapshot:
     available_endpoints: list[str] = field(default_factory=list)
     unavailable_endpoints: dict[str, str] = field(default_factory=dict)
 
+
 @dataclass
 class BirdeyeRiskEvidence:
     holder_count: int | None = None
@@ -55,6 +58,7 @@ class BirdeyeRiskEvidence:
     risk_flags: list[str] = field(default_factory=list)
     evidence: list[str] = field(default_factory=list)
     unknown: list[str] = field(default_factory=list)
+
 
 class BirdeyeProvider:
     """Small read-only client with authentication, pacing, and bounded retries."""
@@ -238,22 +242,57 @@ class BirdeyeProvider:
                     return found
         return None
 
+    @staticmethod
+    def _percent(value: Any) -> float | None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if number < 0:
+            return None
+        if number <= 1:
+            number *= 100
+        return number if number <= 100 else None
+
+    @classmethod
+    def _extract_top10_percent(cls, source: Any) -> float | None:
+        """Extract top-10 supply share from documented profile/distribution shapes."""
+        if not isinstance(source, (dict, list)):
+            return None
+        if isinstance(source, dict):
+            for key in ("top10_holder", "top10Holder", "top10_holder_percent", "top10HolderPercent"):
+                value = source.get(key)
+                if isinstance(value, dict):
+                    value = next((value.get(k) for k in ("percent_of_supply", "percentOfSupply", "percent", "percentage") if value.get(k) is not None), None)
+                parsed = cls._percent(value)
+                if parsed is not None:
+                    return parsed
+            for key in ("holder_summary", "summary"):
+                nested = source.get(key)
+                parsed = cls._extract_top10_percent(nested)
+                if parsed is not None:
+                    return parsed
+        return None
+
     def risk_evidence(self, snapshot: BirdeyeSnapshot) -> BirdeyeRiskEvidence:
         evidence = BirdeyeRiskEvidence()
         holders = snapshot.data.get("token_holders")
         holder_sources = [holders, snapshot.data.get("holder_profile"), snapshot.data.get("holder_distribution")]
         raw_count = None
         for source in holder_sources:
-            raw_count = self._find_number(source, ("total", "holderCount", "holder_count", "totalHolders", "total_holders", "holders"))
+            raw_count = self._find_number(source, ("total", "holderCount", "holder_count", "totalHolders", "total_holders", "holders", "wallet_count"))
             if raw_count is not None and raw_count >= 0:
                 break
         if raw_count is not None:
             evidence.holder_count = int(raw_count)
-        raw_top10 = self._find_number(snapshot.data.get("holder_distribution"), ("percent_of_supply", "percentOfSupply", "top10_holder_percent", "top10HolderPercent", "top10_percent", "percentage"))
-        if raw_top10 is None:
-            raw_top10 = self._find_number(holders, ("top10_holder_percent", "top10HolderPercent", "top10_percent"))
+
+        raw_top10 = None
+        for source in (snapshot.data.get("holder_profile"), snapshot.data.get("holder_distribution"), holders):
+            raw_top10 = self._extract_top10_percent(source)
+            if raw_top10 is not None:
+                break
         if raw_top10 is not None:
-            evidence.top10_holder_percent = max(0.0, min(100.0, raw_top10))
+            evidence.top10_holder_percent = raw_top10
         if evidence.top10_holder_percent is not None:
             if evidence.top10_holder_percent >= 70:
                 evidence.risk_flags.append("top-holder concentration >=70%")
