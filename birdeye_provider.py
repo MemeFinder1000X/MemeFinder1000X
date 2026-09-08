@@ -255,24 +255,72 @@ class BirdeyeProvider:
         return number if number <= 100 else None
 
     @classmethod
+    def _unwrap_data(cls, value: Any) -> Any:
+        """Unwrap repeated API data envelopes without changing ordinary payloads."""
+        current = value
+        for _ in range(4):
+            if isinstance(current, dict) and isinstance(current.get("data"), (dict, list)):
+                current = current["data"]
+                continue
+            return current
+        return current
+
+    @classmethod
     def _extract_top10_percent(cls, source: Any) -> float | None:
-        """Extract top-10 supply share from documented profile/distribution shapes."""
+        """Extract top-10 supply share from current and legacy Birdeye shapes."""
+        source = cls._unwrap_data(source)
         if not isinstance(source, (dict, list)):
             return None
-        if isinstance(source, dict):
-            for key in ("top10_holder", "top10Holder", "top10_holder_percent", "top10HolderPercent"):
-                value = source.get(key)
-                if isinstance(value, dict):
-                    value = next((value.get(k) for k in ("percent_of_supply", "percentOfSupply", "percent", "percentage") if value.get(k) is not None), None)
-                parsed = cls._percent(value)
-                if parsed is not None:
-                    return parsed
-            for key in ("holder_summary", "summary"):
-                nested = source.get(key)
-                parsed = cls._extract_top10_percent(nested)
-                if parsed is not None:
-                    return parsed
-        return None
+
+        exact_keys = (
+            "top10_holder",
+            "top10Holder",
+            "top10_holder_percent",
+            "top10HolderPercent",
+            "top10_holder_percentage",
+            "top10HolderPercentage",
+        )
+        summary_keys = ("summary", "holder_summary")
+        value_keys = ("percent_of_supply", "percentOfSupply", "percent", "percentage")
+
+        def walk(node: Any, in_summary: bool = False) -> float | None:
+            if isinstance(node, dict):
+                # Prefer explicitly named top-10 fields anywhere in the payload.
+                for key in exact_keys:
+                    if key in node:
+                        candidate = node[key]
+                        if isinstance(candidate, dict):
+                            candidate = next((candidate.get(k) for k in value_keys if candidate.get(k) is not None), None)
+                        parsed = cls._percent(candidate)
+                        if parsed is not None:
+                            return parsed
+
+                # The distribution endpoint documents summary.percent_of_supply as
+                # the selected top-N segment's share of total supply.
+                if in_summary:
+                    for key in value_keys:
+                        if key in node:
+                            parsed = cls._percent(node[key])
+                            if parsed is not None:
+                                return parsed
+
+                for key, value in node.items():
+                    if key in summary_keys and isinstance(value, (dict, list)):
+                        parsed = walk(value, True)
+                        if parsed is not None:
+                            return parsed
+                for value in node.values():
+                    parsed = walk(value, in_summary)
+                    if parsed is not None:
+                        return parsed
+            elif isinstance(node, list):
+                for value in node:
+                    parsed = walk(value, in_summary)
+                    if parsed is not None:
+                        return parsed
+            return None
+
+        return walk(source)
 
     def risk_evidence(self, snapshot: BirdeyeSnapshot) -> BirdeyeRiskEvidence:
         evidence = BirdeyeRiskEvidence()
