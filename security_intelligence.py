@@ -10,14 +10,22 @@ def _first(data: Any, *keys: str) -> Any:
     if not isinstance(data, dict):
         return None
     for key in keys:
-        if data.get(key) is not None:
+        if key in data and data[key] is not None:
             return data[key]
     return None
 
 
 def _percent(value: Any) -> float | None:
     if isinstance(value, dict):
-        value = _first(value, "percent_of_supply", "percent", "percentage", "supply_percent", "supplyPercent")
+        value = _first(
+            value,
+            "percent_of_supply",
+            "percentOfSupply",
+            "percent",
+            "percentage",
+            "supply_percent",
+            "supplyPercent",
+        )
     try:
         number = float(value)
     except (TypeError, ValueError):
@@ -31,7 +39,9 @@ def _percent(value: Any) -> float | None:
 
 def _authority_state(value: Any) -> str:
     if value is None:
-        return "UNKNOWN"
+        return "DISABLED"
+    if isinstance(value, bool):
+        return "ACTIVE" if value else "DISABLED"
     text = str(value).strip().lower()
     if text in {"", "none", "null", "false", "0", "disabled", "revoked"}:
         return "DISABLED"
@@ -101,52 +111,71 @@ class SecurityIntelligence:
     async def analyze(self, provider: Any, token_address: str) -> SecurityFinding:
         finding = SecurityFinding()
         try:
-            if hasattr(provider, "security_snapshot"):
-                security_raw = await provider.security_snapshot(token_address)
-            else:
-                snapshot = await provider.analyze_token(token_address)
-                security_raw = snapshot.data.get("token_security")
-                finding._snapshot = snapshot  # compatibility for older providers
-        except Exception:
-            finding.unknown.append("Birdeye security enrichment unavailable")
+            security_raw = await provider.security_snapshot(token_address)
+        except Exception as error:
+            finding.unknown.append("Birdeye token security")
             finding.warnings.append("Security data could not be retrieved")
+            finding.evidence.append(f"Birdeye token-security request failed: {type(error).__name__}")
             return finding
 
         security = _unwrap_data(security_raw)
         if isinstance(security, dict):
             owner = _security_field(security, "ownerAddress", "owner_address")
-            renounced = _security_field(security, "renounced")
-            mintable = _security_field(security, "mintable")
-            if owner is not None:
+            # On Solana, Birdeye documents ownerAddress as the mint authority.
+            if "ownerAddress" in security or "owner_address" in security:
                 finding.mint_authority = _authority_state(owner)
-            elif renounced is not None or mintable is not None:
-                finding.mint_authority = (
-                    "DISABLED" if renounced is True or mintable is False
-                    else "ACTIVE" if renounced is False or mintable is True
-                    else "UNKNOWN"
-                )
             else:
-                finding.unknown.append("mint authority")
+                renounced = _security_field(security, "renounced")
+                mintable = _security_field(security, "mintable")
+                if renounced is not None or mintable is not None:
+                    finding.mint_authority = (
+                        "DISABLED" if renounced is True or mintable is False
+                        else "ACTIVE" if renounced is False or mintable is True
+                        else "UNKNOWN"
+                    )
+                else:
+                    finding.unknown.append("mint authority")
 
             freeze = _security_field(security, "freezeAuthority", "freeze_authority")
             freezeable = _security_field(security, "freezeable")
-            if freeze is not None:
+            if "freezeAuthority" in security or "freeze_authority" in security:
                 finding.freeze_authority = _authority_state(freeze)
             elif freezeable is not None:
                 finding.freeze_authority = "ACTIVE" if bool(freezeable) else "DISABLED"
             else:
                 finding.unknown.append("freeze authority")
 
+            # Solana token_security does not provide an EVM-style honeypot result.
             honeypot = _security_field(security, "honeypot", "isHoneypot", "honeypotRisk")
             if honeypot is not None:
                 text = str(honeypot).strip().lower()
                 finding.honeypot = "YES" if text in {"true", "1", "yes", "high", "danger"} else "NO"
             else:
                 finding.unknown.append("honeypot assessment")
+
+            top10 = _percent(_security_field(security, "top10HolderPercent", "top10_holder_percent", "top10Holder"))
+            if top10 is not None:
+                finding.top10_percent = top10
+
+            creator_percent = _percent(_security_field(security, "creatorPercentage", "creator_percent"))
+            if creator_percent is not None:
+                finding.dev_percent = creator_percent
+
+            creator = _security_field(security, "creatorAddress", "creator_address")
+            if creator:
+                finding.developer_wallet = str(creator)
+
+            lock_info = _security_field(security, "lockInfo", "lock_info")
+            if lock_info is not None:
+                finding.lp_status = "LOCK INFO AVAILABLE"
+                finding.lp_lock_burn = "PROVIDER REPORTED"
+                finding.evidence.append("Birdeye token-security lockInfo available")
+
             finding.evidence.append("Birdeye token-security response available")
         else:
             finding.unknown.extend(["mint authority", "freeze authority", "honeypot assessment"])
 
+        # Holder-profile is the authoritative source for Solana dev/insider/sniper/bundler cohorts.
         try:
             profile = _unwrap_data(await provider.holder_profile(token_address))
         except Exception:
@@ -154,23 +183,39 @@ class SecurityIntelligence:
             finding.unknown.append("holder profile")
 
         if isinstance(profile, dict):
-            summary = profile.get("holder_summary") if isinstance(profile.get("holder_summary"), dict) else profile
+            summary = profile.get("holder_summary") if isinstance(profile.get("holder_summary"), dict) else {}
             profile_top10 = _percent(_first(summary, "top10_holder", "top10_holder_percent", "top10HolderPercent"))
             if profile_top10 is not None:
                 finding.top10_percent = profile_top10
             tags = profile.get("tags", {})
-            finding.dev_percent = _tag_percent(tags, "dev")
+            finding.dev_percent = finding.dev_percent if finding.dev_percent is not None else _tag_percent(tags, "dev")
             finding.insider_percent = _tag_percent(tags, "insider")
             finding.sniper_percent = _tag_percent(tags, "sniper")
             finding.bundler_percent = _tag_percent(tags, "bundler")
             dev_tag = tags.get("dev") if isinstance(tags, dict) else None
             if isinstance(dev_tag, dict):
-                finding.developer_wallet = str(_first(dev_tag, "address", "wallet", "wallet_address") or finding.developer_wallet)
+                finding.developer_wallet = str(
+                    _first(dev_tag, "address", "wallet", "wallet_address") or finding.developer_wallet
+                )
             finding.evidence.append("Birdeye holder-profile data available")
 
-        # LP lock/burn requires actual lock/burn proof; liquidity existence alone is not proof.
-        finding.lp_lock_burn = "UNKNOWN"
-        finding.unknown.append("LP lock/burn proof")
+        # Distribution is a reliable fallback for top-10 concentration when security/profile omit it.
+        if finding.top10_percent is None and hasattr(provider, "holder_distribution"):
+            try:
+                distribution = _unwrap_data(await provider.holder_distribution(token_address))
+                if isinstance(distribution, dict):
+                    summary = distribution.get("summary") if isinstance(distribution.get("summary"), dict) else distribution
+                    finding.top10_percent = _percent(
+                        _first(summary, "percent_of_supply", "percentOfSupply", "top10_holder_percent", "top10HolderPercent")
+                    )
+                    if finding.top10_percent is not None:
+                        finding.evidence.append("Birdeye holder-distribution top-10 concentration available")
+            except Exception:
+                finding.unknown.append("holder distribution")
+
+        # LP lock/burn requires explicit provider evidence; liquidity itself is never treated as proof.
+        if finding.lp_lock_burn == "UNKNOWN":
+            finding.unknown.append("LP lock/burn proof")
 
         score = 70
         known = 0
@@ -197,7 +242,12 @@ class SecurityIntelligence:
             elif finding.top10_percent >= 50:
                 score -= 15
                 finding.warnings.append(f"Top-10 holders control {finding.top10_percent:.1f}%")
-        for label, value in (("developer", finding.dev_percent), ("insider", finding.insider_percent), ("sniper", finding.sniper_percent), ("bundler", finding.bundler_percent)):
+        for label, value in (
+            ("developer", finding.dev_percent),
+            ("insider", finding.insider_percent),
+            ("sniper", finding.sniper_percent),
+            ("bundler", finding.bundler_percent),
+        ):
             if value is not None:
                 known += 1
                 if value >= 15:
