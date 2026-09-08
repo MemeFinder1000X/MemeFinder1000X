@@ -113,7 +113,22 @@ class SecurityIntelligenceTests(unittest.TestCase):
         finding = self.run_async(SecurityIntelligence().analyze(provider, "token"))
         self.assertAlmostEqual(finding.top10_percent, 73, places=6)
         self.assertIn("Top-10 holders control 73.0%", finding.warnings)
-        self.assertLess(finding.security_score, 60)
+        self.assertLessEqual(finding.security_score, 40)
+
+    def test_extreme_top10_is_capped_as_high_risk(self):
+        provider = FakeProvider(
+            Snapshot({"token_security": {"isHoneypot": False}}),
+            profile={
+                "data": {
+                    "top10_holder": {"percent_of_supply": 1.0},
+                    "tags": {},
+                }
+            },
+        )
+        finding = self.run_async(SecurityIntelligence().analyze(provider, "token"))
+        self.assertEqual(finding.top10_percent, 100)
+        self.assertLessEqual(finding.security_score, 25)
+        self.assertEqual(finding.risk, "HIGH")
 
     def test_security_failure_does_not_block_holder_fallbacks(self):
         provider = FakeProvider(
