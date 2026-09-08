@@ -78,6 +78,18 @@ class SecurityIntelligenceTests(unittest.TestCase):
         self.assertIn("Birdeye liquidity lock status: locked", finding.evidence)
         self.assertIn("Birdeye liquidity burn status: not burned", finding.evidence)
 
+    def test_nested_birdeye_liquidity_fields_are_parsed(self):
+        provider = FakeProvider(Snapshot({"token_security": {
+            "ownerAddress": None,
+            "freezeAuthority": None,
+            "isHoneypot": False,
+            "liquidity": {"liquidityLocked": False, "liquidityBurned": True, "lpHoldersCount": 2},
+        }}), profile={"tags": {}})
+        finding = self.run_async(SecurityIntelligence().analyze(provider, "token"))
+        self.assertEqual(finding.lp_status, "UNLOCKED")
+        self.assertEqual(finding.lp_lock_burn, "BURNED")
+        self.assertEqual(finding.lp_holders_count, 2)
+
     def test_birdeye_unlocked_and_unburned_liquidity_is_explicit(self):
         provider = FakeProvider(Snapshot({"token_security": {
             "ownerAddress": None,
