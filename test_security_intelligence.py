@@ -5,14 +5,19 @@ from security_intelligence import SecurityIntelligence
 
 
 class FakeProvider:
-    def __init__(self, snapshot, profile=None):
+    def __init__(self, snapshot, profile=None, distribution=None, security_error=None):
         self.snapshot = snapshot
         self.profile = profile
+        self.distribution = distribution
+        self.security_error = security_error
         self.security_params = None
         self.profile_params = None
+        self.distribution_params = None
 
     async def security_snapshot(self, token_address):
         self.security_params = {"token_address": token_address}
+        if self.security_error is not None:
+            raise self.security_error
         return self.snapshot.data.get("token_security")
 
     async def analyze_token(self, token_address):
@@ -23,6 +28,12 @@ class FakeProvider:
             raise RuntimeError("unavailable")
         self.profile_params = {"token_address": token_address}
         return self.profile
+
+    async def holder_distribution(self, token_address):
+        if self.distribution is None:
+            raise RuntimeError("unavailable")
+        self.distribution_params = {"token_address": token_address}
+        return self.distribution
 
 
 class Snapshot:
@@ -89,6 +100,39 @@ class SecurityIntelligenceTests(unittest.TestCase):
         self.assertEqual(finding.sniper_percent, 4)
         self.assertEqual(finding.bundler_percent, 3)
         self.assertEqual(provider.profile_params["token_address"], "token")
+
+    def test_security_failure_does_not_block_holder_fallbacks(self):
+        provider = FakeProvider(
+            Snapshot({}),
+            profile={
+                "holder_summary": {"top10_holder": 0.42},
+                "tags": {
+                    "dev": {"percent_of_supply": 0.03},
+                    "insider": {"percent_of_supply": 0.05},
+                },
+            },
+            distribution={"summary": {"percent_of_supply": 0.42}},
+            security_error=RuntimeError("HTTP 403"),
+        )
+        finding = self.run_async(SecurityIntelligence().analyze(provider, "token"))
+        self.assertEqual(finding.top10_percent, 42)
+        self.assertEqual(finding.dev_percent, 3)
+        self.assertEqual(finding.insider_percent, 5)
+        self.assertIn("Token-security endpoint unavailable", finding.warnings)
+        self.assertTrue(any("HTTP 403" in item for item in finding.evidence))
+        self.assertEqual(provider.profile_params["token_address"], "token")
+        self.assertEqual(provider.distribution_params["token_address"], "token")
+        self.assertIsNotNone(finding.security_score)
+
+    def test_distribution_is_used_when_profile_has_no_top10(self):
+        provider = FakeProvider(
+            Snapshot({"token_security": {"isHoneypot": False}}),
+            profile={"tags": {}},
+            distribution={"summary": {"percent_of_supply": 0.58}},
+        )
+        finding = self.run_async(SecurityIntelligence().analyze(provider, "token"))
+        self.assertEqual(finding.top10_percent, 58)
+        self.assertEqual(provider.distribution_params["token_address"], "token")
 
     def test_missing_security_data_is_inconclusive_not_safe(self):
         provider = FakeProvider(Snapshot({}))
