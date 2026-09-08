@@ -113,10 +113,12 @@ class SecurityIntelligence:
         try:
             security_raw = await provider.security_snapshot(token_address)
         except Exception as error:
+            # Do not return here: holder-profile/distribution are independent
+            # read-only sources and can still provide useful security evidence.
             finding.unknown.append("Birdeye token security")
-            finding.warnings.append("Security data could not be retrieved")
-            finding.evidence.append(f"Birdeye token-security request failed: {type(error).__name__}")
-            return finding
+            finding.warnings.append("Token-security endpoint unavailable")
+            finding.evidence.append(f"Birdeye token-security request failed: {error}")
+            security_raw = None
 
         security = _unwrap_data(security_raw)
         if isinstance(security, dict):
@@ -178,9 +180,10 @@ class SecurityIntelligence:
         # Holder-profile is the authoritative source for Solana dev/insider/sniper/bundler cohorts.
         try:
             profile = _unwrap_data(await provider.holder_profile(token_address))
-        except Exception:
+        except Exception as error:
             profile = None
             finding.unknown.append("holder profile")
+            finding.evidence.append(f"Birdeye holder-profile request failed: {error}")
 
         if isinstance(profile, dict):
             summary = profile.get("holder_summary") if isinstance(profile.get("holder_summary"), dict) else {}
@@ -210,8 +213,9 @@ class SecurityIntelligence:
                     )
                     if finding.top10_percent is not None:
                         finding.evidence.append("Birdeye holder-distribution top-10 concentration available")
-            except Exception:
+            except Exception as error:
                 finding.unknown.append("holder distribution")
+                finding.evidence.append(f"Birdeye holder-distribution request failed: {error}")
 
         # LP lock/burn requires explicit provider evidence; liquidity itself is never treated as proof.
         if finding.lp_lock_burn == "UNKNOWN":
