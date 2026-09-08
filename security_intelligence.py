@@ -128,7 +128,7 @@ class SecurityFinding:
 class SecurityIntelligence:
     """Build an evidence-weighted security report without safety guarantees."""
 
-    async def analyze(self, provider: Any, token_address: str) -> SecurityFinding:
+    async def analyze(self, provider: Any, token_address: str, top10_hint: Any = None) -> SecurityFinding:
         finding = SecurityFinding()
         try:
             security_raw = await provider.security_snapshot(token_address)
@@ -226,6 +226,15 @@ class SecurityIntelligence:
                 finding.unknown.append("holder distribution")
                 finding.evidence.append(f"Birdeye holder-distribution request failed: {error}")
 
+        # The main scanner already obtains the same holder concentration from
+        # Birdeye's dedicated holder aggregation. Use that value as an explicit
+        # evidence-backed fallback so security scoring cannot disagree with the
+        # displayed holder concentration when the security endpoint omits it.
+        hinted_top10 = _percent(top10_hint)
+        if hinted_top10 is not None and (finding.top10_percent is None or hinted_top10 > finding.top10_percent):
+            finding.top10_percent = hinted_top10
+            finding.evidence.append("Top-10 concentration propagated from Birdeye holder analysis")
+
         if finding.lp_lock_burn == "UNKNOWN":
             finding.unknown.append("LP lock/burn proof")
 
@@ -278,7 +287,6 @@ class SecurityIntelligence:
             score -= 5
 
         # Concentration this extreme is not compatible with a moderate/low risk label.
-        # Keep the result conservative when provider evidence is incomplete.
         if finding.top10_percent is not None and finding.top10_percent >= 90:
             score = min(score, 25)
         elif finding.top10_percent is not None and finding.top10_percent >= 70:
