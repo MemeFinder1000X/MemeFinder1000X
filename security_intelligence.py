@@ -39,10 +39,14 @@ def _install_security_diagnostic() -> None:
     original = BirdeyeProvider.security_snapshot
 
     async def diagnostic_security_snapshot(self: Any, token_address: str) -> Any:
-        data = await original(self, token_address)
+        try:
+            data = await original(self, token_address)
+        except Exception as exc:
+            logger.warning("Birdeye security diagnostic: token-security request failed: %s", exc)
+            raise
         paths = sorted(set(_diagnostic_key_paths(data)))
         if paths:
-            logger.info("Birdeye security diagnostic: LP/liquidity-related keys returned: %s", ", ".join(paths[:80]))
+            logger.warning("Birdeye security diagnostic: LP/liquidity-related keys returned: %s", ", ".join(paths[:80]))
         else:
             logger.warning("Birdeye security diagnostic: NO LP/liquidity-related keys returned by token-security")
         return data
