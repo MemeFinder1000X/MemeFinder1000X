@@ -122,7 +122,9 @@ class BirdeyeProvider:
                 with response:
                     payload = json.loads(response.read().decode("utf-8"))
                 if not isinstance(payload, dict) or payload.get("success") is False:
-                    raise BirdeyeError("Birdeye returned an unsuccessful response")
+                    message = payload.get("message") if isinstance(payload, dict) else None
+                    detail = f": {message}" if message else ""
+                    raise BirdeyeError(f"Birdeye returned an unsuccessful response{detail}")
                 return payload.get("data")
             except HTTPError as error:
                 last_error = error
@@ -138,7 +140,13 @@ class BirdeyeProvider:
                 last_error = error
                 if attempt < BIRDEYE_MAX_RETRIES - 1:
                     await asyncio.sleep(2**attempt)
-        raise BirdeyeError("Birdeye did not respond after several attempts") from last_error
+        if isinstance(last_error, HTTPError):
+            raise BirdeyeError(
+                f"Birdeye returned HTTP {last_error.code} after {BIRDEYE_MAX_RETRIES} attempts"
+            ) from last_error
+        raise BirdeyeError(
+            f"Birdeye request failed after {BIRDEYE_MAX_RETRIES} attempts: {last_error}"
+        ) from last_error
 
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         return await self._request("GET", path, params=params)
