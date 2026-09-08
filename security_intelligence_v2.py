@@ -49,6 +49,32 @@ def tagpct(tags: Any, name: str) -> float | None:
             if isinstance(item,dict) and str(first(item,"tag","name","label") or "").lower()==name: return pct(item)
     return None
 
+
+def bool_state(v: Any) -> bool | None:
+    if isinstance(v, bool): return v
+    if isinstance(v, (int, float)) and v in (0, 1): return bool(v)
+    if isinstance(v, str):
+        s=v.strip().lower()
+        if s in {"true","yes","1","locked","burned"}: return True
+        if s in {"false","no","0","unlocked","not_burned","not burned"}: return False
+    return None
+
+
+def nested_bool(source: Any, keys: tuple[str, ...]) -> bool | None:
+    if isinstance(source, dict):
+        for key in keys:
+            if key in source:
+                parsed=bool_state(source[key])
+                if parsed is not None: return parsed
+        for value in source.values():
+            parsed=nested_bool(value, keys)
+            if parsed is not None: return parsed
+    elif isinstance(source, list):
+        for value in source:
+            parsed=nested_bool(value, keys)
+            if parsed is not None: return parsed
+    return None
+
 @dataclass
 class SecurityFinding:
     security_score: int|None = None
@@ -59,6 +85,7 @@ class SecurityFinding:
     honeypot: str = "UNKNOWN"
     lp_status: str = "UNKNOWN"
     lp_lock_burn: str = "UNKNOWN"
+    lp_holders_count: int|None = None
     top10_percent: float|None = None
     dev_percent: float|None = None
     insider_percent: float|None = None
@@ -91,7 +118,19 @@ class SecurityIntelligence:
             f.dev_percent=pct(first(sec,"creatorPercentage","creator_percent"))
             creator=first(sec,"creatorAddress","creator_address")
             if creator: f.developer_wallet=str(creator)
-            if first(sec,"lockInfo","lock_info") is not None: f.lp_status,f.lp_lock_burn="LOCK INFO AVAILABLE","PROVIDER REPORTED"
+            locked=nested_bool(sec,("liquidityLocked","liquidity_locked","lpLocked","lp_locked"))
+            burned=nested_bool(sec,("liquidityBurned","liquidity_burned","lpBurned","lp_burned"))
+            lp_count=first(sec,"lpHoldersCount","lp_holders_count")
+            try: f.lp_holders_count=int(lp_count) if lp_count is not None else None
+            except (TypeError,ValueError): f.lp_holders_count=None
+            if locked is True: f.lp_status="LOCKED"
+            elif locked is False: f.lp_status="UNLOCKED"
+            if burned is True: f.lp_lock_burn="BURNED"
+            elif locked is True: f.lp_lock_burn="LOCKED"
+            elif locked is False and burned is False: f.lp_lock_burn="UNLOCKED / NOT BURNED"
+            if locked is not None: f.evidence.append(f"Birdeye liquidity lock status: {'locked' if locked else 'not locked'}")
+            if burned is not None: f.evidence.append(f"Birdeye liquidity burn status: {'burned' if burned else 'not burned'}")
+            if f.lp_holders_count is not None: f.evidence.append(f"Birdeye LP holders count: {f.lp_holders_count}")
             f.evidence.append("Birdeye token-security response available")
         try: profile=unwrap(await provider.holder_profile(token_address))
         except Exception as e: profile=None; f.evidence.append(f"Birdeye holder-profile request failed: {e}")
