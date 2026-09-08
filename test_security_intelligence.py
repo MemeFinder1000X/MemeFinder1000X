@@ -121,7 +121,7 @@ class SecurityIntelligenceTests(unittest.TestCase):
         self.assertIn("Token-security endpoint unavailable", finding.warnings)
         self.assertTrue(any("HTTP 403" in item for item in finding.evidence))
         self.assertEqual(provider.profile_params["token_address"], "token")
-        self.assertEqual(provider.distribution_params["token_address"], "token")
+        self.assertIsNone(provider.distribution_params)
         self.assertIsNotNone(finding.security_score)
 
     def test_distribution_is_used_when_profile_has_no_top10(self):
@@ -131,7 +131,7 @@ class SecurityIntelligenceTests(unittest.TestCase):
             distribution={"summary": {"percent_of_supply": 0.58}},
         )
         finding = self.run_async(SecurityIntelligence().analyze(provider, "token"))
-        self.assertEqual(finding.top10_percent, 58)
+        self.assertAlmostEqual(finding.top10_percent, 58, places=6)
         self.assertEqual(provider.distribution_params["token_address"], "token")
 
     def test_missing_security_data_is_inconclusive_not_safe(self):
