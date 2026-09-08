@@ -1,8 +1,9 @@
-"""Runtime entrypoint that restores scan discovery before starting the Telegram bot."""
+"""Runtime entrypoint that restores scan discovery and improves scan quality."""
 
 from urllib.parse import quote
 
 import bot
+from scan_quality import improve_pair, improve_rendered_text
 
 
 async def _scan_newly_active_coins() -> list[dict]:
@@ -54,6 +55,21 @@ async def _scan_newly_active_coins() -> list[dict]:
 
 
 bot._scan_newly_active_coins = _scan_newly_active_coins
+
+# The production bot computes security after market/developer/smart-money
+# enrichment. Wrap the renderer so the final Telegram cards use the completed
+# security evidence and apply the conservative opportunity adjustment.
+_original_render_scan_results = bot._render_scan_results
+
+
+def _quality_render_scan_results(pairs: list[dict], include_header: bool = True) -> str:
+    for pair in pairs:
+        if pair.get("_security") is not None:
+            improve_pair(pair)
+    return improve_rendered_text(_original_render_scan_results(pairs, include_header=include_header))
+
+
+bot._render_scan_results = _quality_render_scan_results
 
 if __name__ == "__main__":
     bot.main()
