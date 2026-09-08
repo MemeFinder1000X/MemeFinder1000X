@@ -17,15 +17,7 @@ def _first(data: Any, *keys: str) -> Any:
 
 def _percent(value: Any) -> float | None:
     if isinstance(value, dict):
-        value = _first(
-            value,
-            "percent_of_supply",
-            "percentOfSupply",
-            "percent",
-            "percentage",
-            "supply_percent",
-            "supplyPercent",
-        )
+        value = _first(value, "percent_of_supply", "percentOfSupply", "percent", "percentage", "supply_percent", "supplyPercent")
     try:
         number = float(value)
     except (TypeError, ValueError):
@@ -82,6 +74,19 @@ def _unwrap_data(value: Any) -> Any:
     return value
 
 
+def _top10_from_profile(profile: dict[str, Any]) -> float | None:
+    """Read the documented top10_holder summary as well as legacy nested forms."""
+    candidates = [profile.get("top10_holder"), profile.get("top10Holder")]
+    summary = profile.get("holder_summary")
+    if isinstance(summary, dict):
+        candidates.extend([summary.get("top10_holder"), summary.get("top10Holder")])
+    for candidate in candidates:
+        parsed = _percent(candidate)
+        if parsed is not None:
+            return parsed
+    return None
+
+
 @dataclass
 class SecurityFinding:
     security_score: int | None = None
@@ -113,8 +118,6 @@ class SecurityIntelligence:
         try:
             security_raw = await provider.security_snapshot(token_address)
         except Exception as error:
-            # Do not return here: holder-profile/distribution are independent
-            # read-only sources and can still provide useful security evidence.
             finding.unknown.append("Birdeye token security")
             finding.warnings.append("Token-security endpoint unavailable")
             finding.evidence.append(f"Birdeye token-security request failed: {error}")
@@ -123,7 +126,6 @@ class SecurityIntelligence:
         security = _unwrap_data(security_raw)
         if isinstance(security, dict):
             owner = _security_field(security, "ownerAddress", "owner_address")
-            # On Solana, Birdeye documents ownerAddress as the mint authority.
             if "ownerAddress" in security or "owner_address" in security:
                 finding.mint_authority = _authority_state(owner)
             else:
@@ -147,7 +149,6 @@ class SecurityIntelligence:
             else:
                 finding.unknown.append("freeze authority")
 
-            # Solana token_security does not provide an EVM-style honeypot result.
             honeypot = _security_field(security, "honeypot", "isHoneypot", "honeypotRisk")
             if honeypot is not None:
                 text = str(honeypot).strip().lower()
@@ -177,7 +178,6 @@ class SecurityIntelligence:
         else:
             finding.unknown.extend(["mint authority", "freeze authority", "honeypot assessment"])
 
-        # Holder-profile is the authoritative source for Solana dev/insider/sniper/bundler cohorts.
         try:
             profile = _unwrap_data(await provider.holder_profile(token_address))
         except Exception as error:
@@ -186,8 +186,7 @@ class SecurityIntelligence:
             finding.evidence.append(f"Birdeye holder-profile request failed: {error}")
 
         if isinstance(profile, dict):
-            summary = profile.get("holder_summary") if isinstance(profile.get("holder_summary"), dict) else {}
-            profile_top10 = _percent(_first(summary, "top10_holder", "top10_holder_percent", "top10HolderPercent"))
+            profile_top10 = _top10_from_profile(profile)
             if profile_top10 is not None:
                 finding.top10_percent = profile_top10
             tags = profile.get("tags", {})
@@ -197,27 +196,21 @@ class SecurityIntelligence:
             finding.bundler_percent = _tag_percent(tags, "bundler")
             dev_tag = tags.get("dev") if isinstance(tags, dict) else None
             if isinstance(dev_tag, dict):
-                finding.developer_wallet = str(
-                    _first(dev_tag, "address", "wallet", "wallet_address") or finding.developer_wallet
-                )
+                finding.developer_wallet = str(_first(dev_tag, "address", "wallet", "wallet_address") or finding.developer_wallet)
             finding.evidence.append("Birdeye holder-profile data available")
 
-        # Distribution is a reliable fallback for top-10 concentration when security/profile omit it.
         if finding.top10_percent is None and hasattr(provider, "holder_distribution"):
             try:
                 distribution = _unwrap_data(await provider.holder_distribution(token_address))
                 if isinstance(distribution, dict):
                     summary = distribution.get("summary") if isinstance(distribution.get("summary"), dict) else distribution
-                    finding.top10_percent = _percent(
-                        _first(summary, "percent_of_supply", "percentOfSupply", "top10_holder_percent", "top10HolderPercent")
-                    )
+                    finding.top10_percent = _percent(_first(summary, "percent_of_supply", "percentOfSupply", "top10_holder_percent", "top10HolderPercent"))
                     if finding.top10_percent is not None:
                         finding.evidence.append("Birdeye holder-distribution top-10 concentration available")
             except Exception as error:
                 finding.unknown.append("holder distribution")
                 finding.evidence.append(f"Birdeye holder-distribution request failed: {error}")
 
-        # LP lock/burn requires explicit provider evidence; liquidity itself is never treated as proof.
         if finding.lp_lock_burn == "UNKNOWN":
             finding.unknown.append("LP lock/burn proof")
 
@@ -246,17 +239,22 @@ class SecurityIntelligence:
             elif finding.top10_percent >= 50:
                 score -= 15
                 finding.warnings.append(f"Top-10 holders control {finding.top10_percent:.1f}%")
-        for label, value in (
-            ("developer", finding.dev_percent),
-            ("insider", finding.insider_percent),
-            ("sniper", finding.sniper_percent),
-            ("bundler", finding.bundler_percent),
-        ):
+        for label, value in (("developer", finding.dev_percent), ("insider", finding.insider_percent), ("sniper", finding.sniper_percent), ("bundler", finding.bundler_percent)):
             if value is not None:
                 known += 1
                 if value >= 15:
                     score -= 10
                     finding.warnings.append(f"High {label} cohort concentration: {value:.1f}%")
+
+        critical_unknowns = sum(
+            value == "UNKNOWN"
+            for value in (finding.mint_authority, finding.freeze_authority, finding.lp_status, finding.lp_lock_burn)
+        )
+        if critical_unknowns >= 3:
+            score -= 10
+            finding.warnings.append("Multiple critical security checks remain unverified")
+        elif critical_unknowns >= 2:
+            score -= 5
 
         if known == 0:
             finding.security_score = None
