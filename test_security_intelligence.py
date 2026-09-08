@@ -62,6 +62,34 @@ class SecurityIntelligenceTests(unittest.TestCase):
         self.assertEqual(finding.freeze_authority, "DISABLED")
         self.assertEqual(finding.honeypot, "NO")
 
+    def test_birdeye_liquidity_lock_and_burn_fields_are_parsed(self):
+        provider = FakeProvider(Snapshot({"token_security": {
+            "ownerAddress": None,
+            "freezeAuthority": None,
+            "isHoneypot": False,
+            "liquidityLocked": True,
+            "liquidityBurned": False,
+            "lpHoldersCount": 3,
+        }}), profile={"tags": {}})
+        finding = self.run_async(SecurityIntelligence().analyze(provider, "token"))
+        self.assertEqual(finding.lp_status, "LOCKED")
+        self.assertEqual(finding.lp_lock_burn, "LOCKED")
+        self.assertEqual(finding.lp_holders_count, 3)
+        self.assertIn("Birdeye liquidity lock status: locked", finding.evidence)
+        self.assertIn("Birdeye liquidity burn status: not burned", finding.evidence)
+
+    def test_birdeye_unlocked_and_unburned_liquidity_is_explicit(self):
+        provider = FakeProvider(Snapshot({"token_security": {
+            "ownerAddress": None,
+            "freezeAuthority": None,
+            "isHoneypot": False,
+            "liquidityLocked": False,
+            "liquidityBurned": False,
+        }}), profile={"tags": {}})
+        finding = self.run_async(SecurityIntelligence().analyze(provider, "token"))
+        self.assertEqual(finding.lp_status, "UNLOCKED")
+        self.assertEqual(finding.lp_lock_burn, "UNLOCKED / NOT BURNED")
+
     def test_holder_profile_tag_percentages_are_preserved(self):
         provider = FakeProvider(Snapshot({"token_security": {"isHoneypot": False}}), profile={"holder_summary": {"top10_holder": 0.61}, "tags": {"dev": {"percent_of_supply": 0.02}, "insider": {"percent_of_supply": 0.08}, "sniper": {"percent_of_supply": 0.04}, "bundler": {"percent_of_supply": 0.03}}})
         finding = self.run_async(SecurityIntelligence().analyze(provider, "token"))
