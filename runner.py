@@ -1,6 +1,7 @@
 """Runtime entrypoint that restores scan discovery and improves scan quality."""
 
 from urllib.parse import quote
+import re
 
 import bot
 from scan_quality import improve_pair, improve_rendered_text
@@ -58,6 +59,52 @@ async def _scan_newly_active_coins() -> list[dict]:
 
 bot._scan_newly_active_coins = _scan_newly_active_coins
 
+
+def _number(value: object) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if result == result else None
+
+
+def _normalize_tag_risk_flags(pair: dict) -> None:
+    """Keep developer/insider warnings consistent with reported security cohorts."""
+    analysis = pair.get("_analysis") or {}
+    flags = analysis.get("risk_flags")
+    if not isinstance(flags, list):
+        return
+    security = pair.get("_security") or {}
+    dev_percent = _number(security.get("dev_percent"))
+    insider_percent = _number(security.get("insider_percent"))
+    normalized: list[object] = []
+    for flag in flags:
+        text = str(flag)
+        if text.lower() == "developer/insider tag observed in top traders":
+            if insider_percent is not None and insider_percent > 0 and dev_percent is not None and dev_percent > 0:
+                text = "developer/insider tag observed in top traders"
+            elif insider_percent is not None and insider_percent > 0:
+                text = "insider tag observed in top traders"
+            elif dev_percent is not None and dev_percent > 0:
+                text = "developer tag observed in top traders"
+            else:
+                # Do not display a specific tag claim when the corresponding
+                # reported cohorts are both zero.
+                continue
+        if text not in normalized:
+            normalized.append(text)
+    analysis["risk_flags"] = normalized
+
+
+def _normalize_low_holder_top10(text: str, holder_count: object) -> str:
+    """Call the concentration Top-N when fewer than ten holders exist."""
+    count = _number(holder_count)
+    if count is None or count < 1 or count >= 10:
+        return text
+    holder_n = int(count)
+    return re.sub(r"Top 10:", f"Top {holder_n}:", text)
+
+
 # The production bot computes security after market/developer/smart-money
 # enrichment. Wrap the renderer so the final Telegram cards use the completed
 # security evidence and apply the conservative opportunity adjustment.
@@ -67,8 +114,13 @@ _original_render_scan_results = bot._render_scan_results
 def _quality_render_scan_results(pairs: list[dict], include_header: bool = True) -> str:
     for pair in pairs:
         if pair.get("_security") is not None:
+            _normalize_tag_risk_flags(pair)
             improve_pair(pair)
-    return improve_rendered_text(_original_render_scan_results(pairs, include_header=include_header))
+    rendered = improve_rendered_text(_original_render_scan_results(pairs, include_header=include_header))
+    if pairs and len(pairs) == 1:
+        holder_count = ((pairs[0].get("_analysis") or {}).get("birdeye_holder_count"))
+        rendered = _normalize_low_holder_top10(rendered, holder_count)
+    return rendered
 
 
 bot._render_scan_results = _quality_render_scan_results
