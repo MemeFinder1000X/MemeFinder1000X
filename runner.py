@@ -5,6 +5,7 @@ from urllib.parse import quote
 import bot
 from scan_quality import improve_pair, improve_rendered_text
 import birdeye_key_diagnostic  # noqa: F401  # logs only a one-way key fingerprint
+import top10_fix  # noqa: F401  # patches Birdeye concentration extraction only
 
 
 async def _scan_newly_active_coins() -> list[dict]:
