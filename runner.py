@@ -7,6 +7,7 @@ import bot
 from scan_quality import improve_pair, improve_rendered_text
 import birdeye_key_diagnostic  # noqa: F401  # logs only a one-way key fingerprint
 import top10_fix  # noqa: F401  # patches Birdeye concentration extraction only
+from scan_presentation_fix import normalize_developer_display, annotate_opportunity_label
 
 
 async def _scan_newly_active_coins() -> list[dict]:
@@ -88,8 +89,6 @@ def _normalize_tag_risk_flags(pair: dict) -> None:
             elif dev_percent is not None and dev_percent > 0:
                 text = "developer tag observed in top traders"
             else:
-                # Do not display a specific tag claim when the corresponding
-                # reported cohorts are both zero.
                 continue
         if text not in normalized:
             normalized.append(text)
@@ -105,9 +104,6 @@ def _normalize_low_holder_top10(text: str, holder_count: object) -> str:
     return re.sub(r"Top 10:", f"Top {holder_n}:", text)
 
 
-# The production bot computes security after market/developer/smart-money
-# enrichment. Wrap the renderer so the final Telegram cards use the completed
-# security evidence and apply the conservative opportunity adjustment.
 _original_render_scan_results = bot._render_scan_results
 
 
@@ -116,10 +112,12 @@ def _quality_render_scan_results(pairs: list[dict], include_header: bool = True)
         if pair.get("_security") is not None:
             _normalize_tag_risk_flags(pair)
             improve_pair(pair)
+        normalize_developer_display(pair)
     rendered = improve_rendered_text(_original_render_scan_results(pairs, include_header=include_header))
     if pairs and len(pairs) == 1:
         holder_count = ((pairs[0].get("_analysis") or {}).get("birdeye_holder_count"))
         rendered = _normalize_low_holder_top10(rendered, holder_count)
+        rendered = annotate_opportunity_label(rendered, pairs[0])
     return rendered
 
 
