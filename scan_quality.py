@@ -47,8 +47,6 @@ def improve_pair(pair: dict[str, Any]) -> None:
     elif top10 is not None and top10 >= 50:
         penalty += 5
 
-    # A strong momentum score without qualified smart-money confirmation should
-    # not receive a free pass. This is a presentation/ranking adjustment only.
     if qualified == 0 and str(smart_score).upper() == "UNKNOWN":
         penalty += 5
 
@@ -56,6 +54,7 @@ def improve_pair(pair: dict[str, Any]) -> None:
     analysis["raw_opportunity_score"] = round(score)
     analysis["opportunity_score"] = adjusted
     analysis["security_adjusted"] = penalty > 0
+    analysis["opportunity_adjustment"] = penalty
 
     if bundler is not None and bundler >= 60:
         flag = f"High bundler cohort concentration: {bundler:.1f}%"
@@ -66,10 +65,11 @@ def improve_pair(pair: dict[str, Any]) -> None:
         if flag not in risk_flags:
             risk_flags.append(flag)
 
-    token_security_unavailable = any(
-        "token-security endpoint unavailable" in str(item).lower()
-        for item in (security.get("warnings") or [])
-    ) or str(security.get("mint_authority", "UNKNOWN")).upper() == "UNKNOWN"
+    security_warnings = [str(item).lower() for item in (security.get("warnings") or [])]
+    token_security_unavailable = (
+        any("token-security" in item and ("unavailable" in item or "401" in item or "403" in item) for item in security_warnings)
+        or str(security.get("mint_authority", "UNKNOWN")).upper() == "UNKNOWN"
+    )
 
     verdict = str(analysis.get("verdict") or "INSUFFICIENT DATA")
     if token_security_unavailable and verdict == "HIGH MOMENTUM":
