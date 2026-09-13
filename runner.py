@@ -8,6 +8,7 @@ from scan_quality import improve_pair, improve_rendered_text
 import birdeye_key_diagnostic  # noqa: F401  # logs only a one-way key fingerprint
 import top10_fix  # noqa: F401  # patches Birdeye concentration extraction only
 import holder_consistency_fix  # noqa: F401  # avoids caching incomplete holder enrichment
+import rugcheck_lp_fix  # noqa: F401  # adds read-only LP lock/burn fallback
 from scan_presentation_fix import normalize_developer_display, annotate_opportunity_label
 
 
