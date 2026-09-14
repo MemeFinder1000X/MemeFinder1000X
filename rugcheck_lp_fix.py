@@ -70,34 +70,50 @@ def _load(token_address: str) -> dict[str, Any]:
     return result
 
 
+def _valid_pct(value: Any) -> float | None:
+    try:
+        pct = float(value)
+    except (TypeError, ValueError):
+        return None
+    return pct if 0 <= pct <= 100 else None
+
+
 def _apply_lp(finding: Any, report: dict[str, Any]) -> None:
     summary = report.get("summary")
     if not isinstance(summary, dict):
         return
 
     locked = summary.get("lpLocked")
-    locked_pct = summary.get("lpLockedPct")
-    if isinstance(locked, bool):
+    locked_pct = _valid_pct(summary.get("lpLockedPct"))
+
+    if locked_pct is not None:
+        finding.evidence.append(f"RugCheck LP locked percentage: {locked_pct:.1f}%")
+        if locked_pct >= 99.99:
+            finding.lp_status = "FULLY LOCKED"
+        elif locked_pct > 0:
+            finding.lp_status = "PARTIALLY LOCKED"
+        else:
+            finding.lp_status = "UNLOCKED"
+        if finding.lp_status == "FULLY LOCKED":
+            finding.lp_lock_burn = "LOCKED"
+        elif finding.lp_status == "PARTIALLY LOCKED":
+            finding.lp_lock_burn = "PARTIALLY LOCKED"
+        else:
+            finding.lp_lock_burn = "UNLOCKED / NOT BURNED"
+    elif isinstance(locked, bool):
         finding.lp_status = "LOCKED" if locked else "UNLOCKED"
         finding.evidence.append(
             f"RugCheck LP lock status: {'locked' if locked else 'not locked'}"
         )
-    try:
-        if locked_pct is not None:
-            pct = float(locked_pct)
-            if 0 <= pct <= 100:
-                finding.evidence.append(f"RugCheck LP locked percentage: {pct:.1f}%")
-                if pct > 0:
-                    finding.lp_status = "LOCKED"
-    except (TypeError, ValueError):
-        pass
+        if locked:
+            finding.lp_lock_burn = "LOCKED"
+        else:
+            finding.lp_lock_burn = "UNLOCKED / NOT BURNED"
 
     if summary.get("lpBurned") is True or summary.get("lp_burned") is True:
         finding.lp_lock_burn = "BURNED"
-        finding.lp_status = "LOCKED"
+        finding.lp_status = "FULLY LOCKED"
         finding.evidence.append("RugCheck reports LP tokens burned")
-    elif finding.lp_status == "LOCKED":
-        finding.lp_lock_burn = "LOCKED"
 
 
 def _apply_lockers(finding: Any, report: dict[str, Any]) -> None:
@@ -119,9 +135,9 @@ def _apply_lockers(finding: Any, report: dict[str, Any]) -> None:
 
     if burned:
         finding.lp_lock_burn = "BURNED"
-        finding.lp_status = "LOCKED"
+        finding.lp_status = "FULLY LOCKED"
         finding.evidence.append("RugCheck locker data reports burned LP tokens")
-    elif active:
+    elif active and finding.lp_status == "UNKNOWN":
         finding.lp_status = "LOCKED"
         finding.lp_lock_burn = "LOCKED"
         finding.evidence.append(f"RugCheck active LP lockers found: {len(active)}")
