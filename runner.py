@@ -85,11 +85,11 @@ def _normalize_tag_risk_flags(pair: dict) -> None:
         text = str(flag)
         if text.lower() == "developer/insider tag observed in top traders":
             if insider_percent is not None and insider_percent > 0 and dev_percent is not None and dev_percent > 0:
-                text = "developer/insider tag observed in top traders"
+                text = "developer/insider tags observed among top traders"
             elif insider_percent is not None and insider_percent > 0:
-                text = "insider tag observed in top traders"
+                text = "insider-tagged wallet observed among top traders"
             elif dev_percent is not None and dev_percent > 0:
-                text = "developer tag observed in top traders"
+                text = "developer-tagged wallet observed among top traders"
             else:
                 continue
         if text not in normalized:
