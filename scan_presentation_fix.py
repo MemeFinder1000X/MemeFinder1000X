@@ -22,6 +22,18 @@ def normalize_developer_display(pair: dict[str, Any]) -> None:
     evidence = str(developer.get("evidence") or "UNKNOWN")
     confidence = str(developer.get("identity_confidence") or "UNKNOWN").upper()
 
+    rpc_unavailable = "rpc launch probe unavailable" in coverage.lower()
+    if rpc_unavailable:
+        # Do not present an RPC-derived signer claim when the launch probe was
+        # unavailable for this scan. Preserve Birdeye P&L evidence if present.
+        developer["evidence"] = (
+            "Birdeye wallet-token activity observed; Solana RPC launch probe "
+            "was unavailable, so creator identity and prior launch history are unverified."
+        )
+        if "PROBABLE FIRST-TRANSACTION SIGNER" in confidence:
+            developer["identity_confidence"] = "UNKNOWN"
+        confidence = str(developer.get("identity_confidence") or "UNKNOWN").upper()
+
     match = re.search(r"Birdeye returned (\d+) wallet-token P&L observation\(s\)", coverage, re.I)
     if match and "no explicit mint initialization" in coverage.lower():
         count = match.group(1)
@@ -34,7 +46,7 @@ def normalize_developer_display(pair: dict[str, Any]) -> None:
     elif len(coverage) > 150:
         developer["history_coverage"] = coverage[:147] + "…"
 
-    if "PROBABLE FIRST-TRANSACTION SIGNER" in confidence:
+    if not rpc_unavailable and "PROBABLE FIRST-TRANSACTION SIGNER" in confidence:
         developer["evidence"] = (
             "Probable first-transaction signer from Solana RPC; creator identity "
             "and prior launch history are unverified."
