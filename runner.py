@@ -106,6 +106,35 @@ def _normalize_low_holder_top10(text: str, holder_count: object) -> str:
     return re.sub(r"Top 10:", f"Top {holder_n}:", text)
 
 
+def _apply_safety_verdict_gate(pair: dict) -> None:
+    """Prevent a momentum label from masking critical security/data weaknesses.
+
+    This changes only the final displayed verdict; the opportunity score and its
+    underlying scoring formula remain untouched.
+    """
+    analysis = pair.get("_analysis") or {}
+    security = pair.get("_security") or {}
+    current = str(analysis.get("verdict") or "INSUFFICIENT DATA")
+    security_risk = str(security.get("risk") or "").upper()
+    liquidity = (pair.get("liquidity") or {}).get("usd")
+    liquidity_known = _number(liquidity) is not None and _number(liquidity) > 0
+    unknown = analysis.get("unknown") or []
+    missing_liquidity = not liquidity_known or any(
+        "liquidity" in str(item).lower() for item in unknown
+    )
+
+    if security_risk == "HIGH":
+        analysis["verdict"] = "HIGH RISK"
+        return
+
+    if current == "HIGH MOMENTUM" and missing_liquidity:
+        analysis["verdict"] = "INSUFFICIENT DATA"
+        return
+
+    if current == "HIGH MOMENTUM" and security_risk in {"INCONCLUSIVE", "UNKNOWN"}:
+        analysis["verdict"] = "INSUFFICIENT DATA"
+
+
 _original_render_scan_results = bot._render_scan_results
 
 
@@ -114,6 +143,7 @@ def _quality_render_scan_results(pairs: list[dict], include_header: bool = True)
         if pair.get("_security") is not None:
             _normalize_tag_risk_flags(pair)
             improve_pair(pair)
+            _apply_safety_verdict_gate(pair)
         normalize_developer_display(pair)
     rendered = improve_rendered_text(_original_render_scan_results(pairs, include_header=include_header))
     if pairs and len(pairs) == 1:
