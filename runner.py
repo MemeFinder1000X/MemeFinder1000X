@@ -4,6 +4,7 @@ from urllib.parse import quote
 import re
 
 import bot
+from evm_intelligence import enrich_evm_pair
 from scan_quality import improve_pair, improve_rendered_text
 import birdeye_key_diagnostic  # noqa: F401  # logs only a one-way key fingerprint
 import top10_fix  # noqa: F401  # patches Birdeye concentration extraction only
@@ -51,6 +52,33 @@ async def _scan_newly_active_coins() -> list[dict]:
         if key[0].lower() not in bot.SUPPORTED_CHAINS or not has_meme_signal:
             continue
         analyzed = bot._analyze_pair(pair)
+
+        # EVM holder intelligence is deliberately conservative and read-only.
+        # It only runs for recent EVM tokens and falls back to UNKNOWN when a
+        # bounded public-RPC snapshot cannot be completed safely.
+        if key[0].lower() in {
+            "arbitrum", "base", "ethereum", "optimism", "polygon", "bsc",
+            "avalanche", "linea", "fantom", "cronos",
+        }:
+            evm = await enrich_evm_pair(analyzed)
+            analysis = analyzed.setdefault("_analysis", {})
+            if evm.get("holder_count") is not None:
+                analysis["birdeye_holder_count"] = evm["holder_count"]
+                analysis["evm_holder_count"] = evm["holder_count"]
+                analysis["unknown"] = [x for x in analysis.get("unknown", []) if x != "holder growth"]
+            if evm.get("top10_percent") is not None:
+                analysis["birdeye_top10_holder_percent"] = evm["top10_percent"]
+                analysis["evm_top10_holder_percent"] = evm["top10_percent"]
+                analysis["unknown"] = [x for x in analysis.get("unknown", []) if x != "holder concentration"]
+                if evm["top10_percent"] >= 70:
+                    flag = f"Top-10 holders control {evm['top10_percent']:.1f}%"
+                    if flag not in analysis.setdefault("risk_flags", []):
+                        analysis["risk_flags"].append(flag)
+            if evm.get("status") == "VERIFIED":
+                analysis.setdefault("evidence", []).append(
+                    f"EVM holder snapshot verified from {evm.get('scanned_transfer_events', 0)} Transfer event(s)."
+                )
+
         if key[0] and key[1] and (
             key not in best_by_token
             or bot._score_pair(analyzed) > bot._score_pair(best_by_token[key])
@@ -125,6 +153,8 @@ def _apply_safety_verdict_gate(pair: dict) -> None:
 
     holder_count = analysis.get("birdeye_holder_count")
     top10 = security.get("top10_percent")
+    if top10 is None:
+        top10 = analysis.get("evm_top10_holder_percent")
     holders_unknown = _number(holder_count) is None or _number(holder_count) < 1
     top10_unknown = _number(top10) is None
 
@@ -140,7 +170,7 @@ def _apply_safety_verdict_gate(pair: dict) -> None:
         analysis["verdict"] = "INSUFFICIENT DATA"
         return
 
-    # A momentum spike is not actionable when core holder concentration and
+    # A momentum spike is not actionable when holder concentration and
     # security intelligence are both unavailable. Keep the opportunity score,
     # but make the final decision explicitly data-gated.
     if current == "HIGH MOMENTUM" and holders_unknown and top10_unknown:
@@ -155,7 +185,9 @@ def _quality_render_scan_results(pairs: list[dict], include_header: bool = True)
         if pair.get("_security") is not None:
             _normalize_tag_risk_flags(pair)
             improve_pair(pair)
-            _apply_safety_verdict_gate(pair)
+        # Apply the verdict gate to every chain, including EVM pairs that do not
+        # have a Solana security object.
+        _apply_safety_verdict_gate(pair)
         normalize_developer_display(pair)
     rendered = improve_rendered_text(_original_render_scan_results(pairs, include_header=include_header))
     if pairs and len(pairs) == 1:
