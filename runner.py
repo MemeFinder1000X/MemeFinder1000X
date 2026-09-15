@@ -107,7 +107,7 @@ def _normalize_low_holder_top10(text: str, holder_count: object) -> str:
 
 
 def _apply_safety_verdict_gate(pair: dict) -> None:
-    """Prevent a momentum label from masking critical security/data weaknesses.
+    """Prevent momentum labels from masking critical security/data weaknesses.
 
     This changes only the final displayed verdict; the opportunity score and its
     underlying scoring formula remain untouched.
@@ -123,6 +123,11 @@ def _apply_safety_verdict_gate(pair: dict) -> None:
         "liquidity" in str(item).lower() for item in unknown
     )
 
+    holder_count = analysis.get("birdeye_holder_count")
+    top10 = security.get("top10_percent")
+    holders_unknown = _number(holder_count) is None or _number(holder_count) < 1
+    top10_unknown = _number(top10) is None
+
     if security_risk == "HIGH":
         analysis["verdict"] = "HIGH RISK"
         return
@@ -132,6 +137,13 @@ def _apply_safety_verdict_gate(pair: dict) -> None:
         return
 
     if current == "HIGH MOMENTUM" and security_risk in {"INCONCLUSIVE", "UNKNOWN"}:
+        analysis["verdict"] = "INSUFFICIENT DATA"
+        return
+
+    # A momentum spike is not actionable when core holder concentration and
+    # security intelligence are both unavailable. Keep the opportunity score,
+    # but make the final decision explicitly data-gated.
+    if current == "HIGH MOMENTUM" and holders_unknown and top10_unknown:
         analysis["verdict"] = "INSUFFICIENT DATA"
 
 
